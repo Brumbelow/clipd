@@ -9,10 +9,6 @@
 //!
 //! Default policy: skip storage entirely. See `SecretsPolicy`.
 
-// Wired into `daemon::capture` in Step 3. Tests exercise the public surface
-// today; the binary doesn't call it yet, hence the module-wide allow.
-#![allow(dead_code)]
-
 use crate::config::SecretsConfig;
 
 use once_cell::sync::Lazy;
@@ -29,9 +25,22 @@ pub enum Verdict {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
     ExcludeFormatFlag,
+    ClipboardHistoryDisabled,
     PasswordManagerWindow,
     KnownSecretPattern,
     HighEntropyToken,
+}
+
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Reason::ExcludeFormatFlag => "exclude_format_flag",
+            Reason::ClipboardHistoryDisabled => "clipboard_history_disabled",
+            Reason::PasswordManagerWindow => "password_manager_window",
+            Reason::KnownSecretPattern => "known_secret_pattern",
+            Reason::HighEntropyToken => "high_entropy_token",
+        }
+    }
 }
 
 /// Patterns we'll never store. Order matters only for diagnostics.
@@ -80,7 +89,7 @@ static SECRET_PATTERNS: Lazy<Vec<(Reason, Regex)>> = Lazy::new(|| {
 /// Window titles indicating a password-manager-adjacent context.
 static PWM_TITLE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)(1password|bitwarden|keepass|keepassxc|lastpass|dashlane|nordpass|vaultwarden)",
+        r"(?i)(password|vault|1password|bitwarden|keepass|keepassxc|lastpass|dashlane|nordpass|vaultwarden)",
     )
     .expect("static regex")
 });
@@ -176,6 +185,10 @@ mod tests {
     fn pwm_window_title() {
         assert!(matches!(
             classify("anything", Some("1Password 8"), false, &cfg()),
+            Verdict::Sensitive(Reason::PasswordManagerWindow)
+        ));
+        assert!(matches!(
+            classify("anything", Some("Corporate Password Vault"), false, &cfg()),
             Verdict::Sensitive(Reason::PasswordManagerWindow)
         ));
     }

@@ -16,9 +16,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage,
-    RegisterClassExW, TranslateMessage, HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLIPBOARDUPDATE, WM_DESTROY, WM_HOTKEY, WNDCLASSEXW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
+    GetWindowTextLengthW, GetWindowTextW, PostQuitMessage, RegisterClassExW, TranslateMessage,
+    HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_DESTROY,
+    WM_HOTKEY, WNDCLASSEXW,
 };
 
 const HOTKEY_ID: i32 = 0xC11D; // "clip d"
@@ -129,8 +130,13 @@ unsafe extern "system" fn wnd_proc(
             if let Some(state) = STATE.get() {
                 if state.is_paused() {
                     debug!("clipboard update ignored (paused)");
-                } else if let Err(e) = capture::handle_clipboard_update(state, hwnd) {
-                    warn!("capture failed: {e:#}");
+                } else {
+                    let foreground_title = foreground_window_title();
+                    if let Err(e) =
+                        capture::handle_clipboard_update(state, foreground_title.as_deref())
+                    {
+                        warn!("capture failed: {e:#}");
+                    }
                 }
             }
             LRESULT(0)
@@ -152,6 +158,30 @@ unsafe extern "system" fn wnd_proc(
         // SAFETY: DefWindowProcW is the documented fallback for unhandled messages.
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
+}
+
+fn foreground_window_title() -> Option<String> {
+    // SAFETY: GetForegroundWindow returns the current foreground HWND or NULL.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() {
+        return None;
+    }
+
+    // SAFETY: hwnd came from GetForegroundWindow. A zero length means no title
+    // or inaccessible title; both are non-fatal for capture.
+    let len = unsafe { GetWindowTextLengthW(hwnd) };
+    if len <= 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u16; len as usize + 1];
+    // SAFETY: buf is writable and includes room for the trailing NUL.
+    let copied = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if copied <= 0 {
+        return None;
+    }
+
+    Some(String::from_utf16_lossy(&buf[..copied as usize]))
 }
 
 /// Spawn `clipd pick` as a subprocess. Picker connects back over IPC.
