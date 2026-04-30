@@ -1,0 +1,25 @@
+# Cargo build output
+/target/
+
+# Cargo lockfile is committed for binaries (kept by default).
+# If this becomes a library, uncomment:
+# Cargo.lock
+
+# Editor / OS cruft
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local env / secrets
+.env
+.env.local
+*.pem
+*.key
+
+# clipd runtime data — never commit a real user's clipboard DB
+**/entries.db
+**/entries.db-*
+**/key.dpapi

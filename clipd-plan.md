@@ -1,0 +1,270 @@
+# clipd — Local-First Clipboard History Manager for Windows 11
+
+**Target platform:** Windows 11 (x86_64-pc-windows-msvc)
+**Repo:** https://github.com/Brumbelow/clipd
+
+---
+
+## Thesis
+
+Win+V is bad: 25-item cap, no real search, no filtering, cloud-sync without
+clear opt-out. ClipboardFusion / ArsClip / Ditto are aging Win32/.NET UIs with
+no fuzzy search and no developer affordances. 
+
+`clipd` wins on:
+
+1. **Fast fuzzy search** — sub-100ms hotkey-to-results, nucleo-ranked.
+2. **Local-only by default** — no cloud sync, ever.
+3. **Encrypted at rest** — DPAPI-wrapped AES-GCM, per-user keying.
+4. **Password-manager-aware** — respects `ExcludeClipboardContentFromMonitoring`,
+   detects high-entropy secrets, refuses to store sensitive content.
+5. **Dev-friendly** — auto-classifies entries (URL / JSON / hash / base64 / code),
+   preserves all formats on paste-back, search syntax for date filters.
+6. **Single static binary** — no runtime, no installer required.
+
+---
+
+## Architecture
+
+Two-process model, one binary:
+
+```
+┌──────────────────────┐         named pipe \\.\pipe\clipd
+│ clipd --daemon       │ ─────────────────────────────────┐
+│  · Win32 msg pump    │                                  │
+│  · clipboard listener│                                  │
+│  · global hotkey     │                                  ▼
+│  · IPC server        │                          ┌──────────────────┐
+│  · tray icon         │                          │ clipd pick       │
+│  · SQLite + crypto   │                          │  · egui picker   │
+└──────────────────────┘                          │  · IPC client    │
+                                                  │  · short-lived   │
+                                                  └──────────────────┘
+```
+
+### Why two processes
+
+- Picker can crash without losing the clipboard hook or DB connection.
+- Hotkey launches a fresh process — feels snappier than unhiding a window.
+- Daemon stays minimal; picker pulls in eframe/wgpu without bloating the daemon.
+
+### Win32 capture details
+
+- `AddClipboardFormatListener` on a message-only window (`HWND_MESSAGE` parent).
+- Single message pump handles `WM_CLIPBOARDUPDATE` and `WM_HOTKEY`.
+- `RegisterHotKey` for the configured chord (default `Ctrl+Alt+C`).
+- IPC server runs on a separate thread with blocking `interprocess` named pipe.
+
+### Storage
+
+SQLite via `rusqlite` (bundled). Schema in `src/store/schema.rs`:
+
+```sql
+CREATE TABLE entries (
+    id          INTEGER PRIMARY KEY,
+    created_at  INTEGER NOT NULL,           -- unix ms
+    last_seen   INTEGER NOT NULL,           -- unix ms (bumped on dedup)
+    kind        TEXT NOT NULL,              -- text|image|files|html|rtf|mixed
+    content     BLOB NOT NULL,              -- AES-GCM ciphertext
+    nonce       BLOB NOT NULL,              -- 12-byte nonce
+    preview     TEXT,                       -- first 200 chars, lowercased
+    source_app  TEXT,                       -- foreground process at capture
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    sensitive   INTEGER NOT NULL DEFAULT 0,
+    hash        BLOB NOT NULL,              -- blake3 of plaintext content
+    size_bytes  INTEGER NOT NULL,
+    formats     TEXT                        -- JSON: extra format payloads
+);
+
+CREATE UNIQUE INDEX idx_hash ON entries(hash);
+CREATE INDEX idx_created ON entries(created_at DESC);
+CREATE INDEX idx_last_seen ON entries(last_seen DESC);
+
+CREATE VIRTUAL TABLE entries_fts USING fts5(
+    preview,
+    content=entries,
+    content_rowid=id,
+    tokenize='porter unicode61'
+);
+```
+
+### Encryption
+
+- Per-install AES-GCM-256 key generated on first run.
+- Key wrapped with Windows DPAPI (`CryptProtectData`) and stored at
+  `%APPDATA%\clipd\key.dpapi`.
+- Each row's `content` BLOB encrypted with a fresh 12-byte nonce stored alongside.
+- Rationale: DPAPI ties unwrap to the current Windows user account, so the DB
+  is unreadable from another user on the same box and unreadable if exfiltrated
+  without the user's Windows credentials.
+
+### Search
+
+1. FTS5 prefilter with the user's textual query (porter stemmer).
+2. nucleo fuzzy rerank over FTS candidates for ordering.
+3. Date filters (`:today`, `:7d`, `>2026-04-01`) applied as SQL `WHERE` before
+   text search.
+
+---
+
+## Sensitive content policy (DAY 1, NOT v0.3)
+
+`clipd` MUST refuse to persist any of the following:
+
+1. Clipboard payload includes the `ExcludeClipboardContentFromMonitoring`
+   registered format. Bitwarden, 1Password, KeePass, modern browsers set this.
+2. Clipboard payload includes `CanIncludeInClipboardHistory` = 0.
+3. Foreground window title at capture time matches `(?i)(password|vault|1password|bitwarden|keepass|lastpass)`.
+4. Content matches a known-secret pattern:
+   - `sk-[A-Za-z0-9]{20,}` (OpenAI-style)
+   - `ghp_[A-Za-z0-9]{36}` (GitHub PAT)
+   - `xox[bpars]-[A-Za-z0-9-]{10,}` (Slack)
+   - `AKIA[0-9A-Z]{16}` (AWS access key)
+   - JWT structure (3 base64url segments separated by `.`)
+   - PEM block headers (`-----BEGIN ... PRIVATE KEY-----`)
+5. Content is a single token of length 20–80, no whitespace, with
+   Shannon entropy > 4.5 bits/char.
+
+Default: **skip storage entirely** for matches. User can opt into "store but
+mark sensitive" in `config.toml`. Sensitive entries are never auto-promoted
+on hotkey, never appear in default search, and require an explicit `:sensitive`
+filter to surface.
+
+Test fixture: copy a password from Bitwarden, confirm zero rows inserted.
+This test runs in CI via a recorded clipboard-event fixture (no real Bitwarden
+needed — we test the format-detection layer in isolation).
+
+---
+
+## 14-point MVP plan
+
+Acceptance criteria are testable.
+
+### Step 1 — Win32 plumbing
+- Message-only window with `wnd_proc`.
+- `AddClipboardFormatListener` registered.
+- `RegisterHotKey` for `Ctrl+Alt+C`.
+- **Accept:** running `clipd --daemon` logs every clipboard change and prints
+  `hotkey!` when chord is pressed.
+
+### Step 2 — Storage
+- SQLite open / migrate / insert path.
+- blake3 dedup; on duplicate, bump `last_seen` instead of inserting.
+- `clipd list` subcommand prints last 50 entries.
+- **Accept:** copy 5 things, run `clipd list`, see 5 entries; copy the same
+  thing twice, see 1 entry with updated `last_seen`.
+
+### Step 3 — Sensitive detection
+- `secrets::is_sensitive(payload, foreground_title) -> Decision`.
+- Format-flag check for `ExcludeClipboardContentFromMonitoring`.
+- Regex + entropy heuristics.
+- **Accept:** unit tests pass for: GitHub PAT, AWS key, OpenAI key, JWT,
+  PEM block, plain English text (must NOT match), random hex hash
+  (configurable — default skip).
+
+### Step 4 — Encryption at rest
+- `store::crypto::Vault` — DPAPI-wrap AES-GCM key on first run.
+- Encrypt on insert, decrypt on read.
+- **Accept:** open `entries.db` in DB Browser for SQLite from a different
+  Windows user account → `content` column is opaque ciphertext.
+
+### Step 5 — IPC server
+- Named-pipe server at `\\.\pipe\clipd` on a worker thread.
+- JSON-line protocol: `list`, `search`, `get`, `promote`, `pin`, `delete`,
+  `pause`, `resume`.
+- **Accept:** `echo '{"op":"list","limit":10}' | nc -U \\.\pipe\clipd` (or
+  PowerShell named-pipe equivalent) returns JSON results.
+
+### Step 6 — egui picker
+- `clipd pick` opens a borderless always-on-top egui window.
+- Search input on top, virtualized result list below.
+- Live nucleo fuzzy filter.
+- Enter promotes selected entry, window closes.
+- **Accept:** Ctrl+Alt+C opens picker in <100ms. Type 3 chars, see filtered
+  results. Enter restores clipboard to selection.
+
+### Step 7 — Format preservation on promote
+- Capture all clipboard formats at copy time, store in `formats` JSON column.
+- Restore all formats on promote (loop `SetClipboardData`).
+- **Accept:** copy a styled cell from Excel, promote later → paste into Excel
+  preserves formatting; paste into Notepad gets the plain text fallback.
+
+### Step 8 — Image support
+- PNG-encode CF_DIB on capture (deflate via `image` crate or raw zlib).
+- Picker renders thumbnails (egui `Image::from_bytes`).
+- **Accept:** Win+PrtScn → picker shows scaled thumbnail; Enter pastes original
+  image into Paint.
+
+### Step 9 — Date/time filtering
+- Picker query parser: `:today`, `:yesterday`, `:7d`, `:30d`, `>YYYY-MM-DD`,
+  `<YYYY-MM-DD`, range `YYYY-MM-DD..YYYY-MM-DD`.
+- Applied as SQL `WHERE` before FTS.
+- **Accept:** `:7d kubectl` returns only entries with "kubectl" in the last
+  7 days.
+
+### Step 10 — Pinning + auto-classification
+- `kind` field auto-set: `url|json|hex|base64|code|text` based on shape of preview.
+- Picker shows colored badge per kind.
+- Pinned entries float to top, survive retention purge.
+- **Accept:** copy a URL → entry has `kind=url` badge. Pin via `Ctrl+P` in
+  picker; entry survives a forced retention purge.
+
+### Step 11 — Tray + autostart
+- `tray-icon` on the daemon — quit, open config, pause/resume capture.
+- `clipd install --autostart` writes `HKCU\...\Run\clipd` registry key.
+- **Accept:** reboot → daemon starts → tray icon visible → hotkey works.
+
+### Step 12 — Config + retention
+- `config.toml` at `%APPDATA%\clipd\config.toml`: hotkey, retention days,
+  max entries, excluded apps (by exe name), sensitive policy.
+- Nightly purge job: delete unpinned entries older than retention or beyond
+  `max_entries` (LRU by `last_seen`).
+- **Accept:** set retention to 1 day, age an entry past 1 day (clock manipulation
+  in test), run purge, entry gone unless pinned.
+
+### Step 13 — Polish
+- Tracing → file logger at `%APPDATA%\clipd\logs\clipd.log` with rotation.
+- Crash handler logs panic + backtrace.
+- `clipd doctor` subcommand: prints config, checks key file, DB integrity,
+  named pipe reachability, hotkey registration.
+
+### Step 14 — Release
+- GitHub Actions: Windows MSVC build, `cargo test`, signed release artifact.
+- Zipped portable: `clipd.exe` + `config.example.toml` + `README.md`.
+- v0.1.0 git tag.
+- **Accept:** download zip on a clean Win11 VM, run `clipd install --autostart`,
+  reboot, hotkey works.
+
+---
+
+## What's deferred (DO NOT BUILD IN v0.1)
+
+- Cloud sync. Architecturally out of scope. If anyone wants this later it's an
+  opt-in plugin with explicit per-entry sync flags. Not in v1.
+- Linux / macOS. Port after Windows is stable. Capture layer is the only
+  platform-specific code if `trait ClipboardSource` is kept clean.
+- Plugin / scripting system. Will balloon scope.
+- OCR on copied images.
+- Browser extensions / native messaging.
+- Snippet expansion.
+
+## Threat model
+
+A clipboard manager that runs as a user-mode daemon and stores everything is,
+structurally, a credential exfiltration tool. The user is the threat model.
+Mitigations baked into v0.1 and not deferred:
+
+- DPAPI-wrapped AES-GCM at rest (Day 4).
+- Password-manager exclusion + secret-pattern heuristics (Day 3).
+- Default retention < 30 days (configurable).
+- No cloud sync, ever.
+- `clipd doctor` surfaces what's stored and where.
+
+## Out-of-scope threats
+
+- Malware running as the same Windows user. DPAPI cannot defend against this;
+  the malware can simply call `CryptUnprotectData` itself. This is a fundamental
+  limit of any user-mode clipboard tool and is documented in the README.
+- Cold-boot / disk-image attacks. DPAPI key is on disk wrapped to the user
+  profile; an attacker with the user's NTUSER.DAT and password can decrypt.
+  BitLocker is the answer here, not clipd.

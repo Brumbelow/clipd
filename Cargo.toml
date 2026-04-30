@@ -1,0 +1,84 @@
+[package]
+name = "clipd"
+version = "0.1.0"
+edition = "2021"
+authors = ["Andrew Brumbelow"]
+description = "Local-first clipboard history manager for Windows 11"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Brumbelow/clipd"
+rust-version = "1.78"
+
+[[bin]]
+name = "clipd"
+path = "src/main.rs"
+
+[dependencies]
+# ---- Win32 ----
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Security_Cryptography",
+    "Win32_Graphics_Gdi",
+] }
+clipboard-win = "5"
+
+# ---- Storage ----
+rusqlite = { version = "0.32", features = ["bundled", "blob", "chrono"] }
+
+# ---- Search ----
+nucleo = "0.5"
+
+# ---- Hashing + crypto ----
+blake3 = "1"
+aes-gcm = "0.10"
+rand = "0.8"
+
+# ---- IPC (Windows named pipes via interprocess) ----
+interprocess = "2"
+
+# ---- Serde + config ----
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# ---- CLI ----
+clap = { version = "4", features = ["derive"] }
+
+# ---- Tray ----
+tray-icon = "0.19"
+
+# ---- Picker UI ----
+eframe = { version = "0.29", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+] }
+egui = "0.29"
+
+# ---- Utility ----
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+regex = "1"
+once_cell = "1"
+parking_lot = "0.12"
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+
+[profile.dev]
+opt-level = 1
