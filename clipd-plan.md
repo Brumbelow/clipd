@@ -179,7 +179,7 @@ Acceptance criteria are testable.
 - **Accept:** open `entries.db` in DB Browser for SQLite from a different
   Windows user account → `content` column is opaque ciphertext.
 
-### Step 5 — IPC server
+### Step 5 — IPC server ✅
 - Named-pipe server at `\\.\pipe\clipd` on a worker thread.
 - JSON-line protocol: `list`, `search`, `get`, `promote`, `pin`, `delete`,
   `pause`, `resume`.
