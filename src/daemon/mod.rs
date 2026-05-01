@@ -6,6 +6,7 @@
 //!   - `ipc`       — named-pipe server (stub until Step 5).
 
 pub mod capture;
+pub mod clipboard;
 pub mod ipc;
 pub mod win_hook;
 
@@ -36,7 +37,6 @@ impl DaemonState {
         *self.paused.read()
     }
 
-    #[allow(dead_code)] // wired in Step 5 via IPC Pause/Resume
     pub fn set_paused(&self, v: bool) {
         *self.paused.write() = v;
     }
@@ -47,5 +47,6 @@ pub fn run(cfg: Config) -> Result<()> {
     let key_path = cfg.key_full_path();
     let vault = Vault::open(&key_path).context("opening clipd vault (DPAPI key)")?;
     let state = DaemonState::new(Arc::new(cfg), Arc::new(vault));
+    ipc::server::spawn(state.clone()).context("starting IPC server")?;
     win_hook::run(state)
 }

@@ -74,9 +74,6 @@ impl Vault {
         Ok((nonce_bytes.to_vec(), ct))
     }
 
-    // Wired into the IPC `get` / promote path (Step 5/6). Until then the
-    // binary build sees this as dead; tests cover the AEAD invariants.
-    #[allow(dead_code)]
     pub fn decrypt(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
         if nonce.len() != NONCE_BYTES {
             return Err(anyhow!(

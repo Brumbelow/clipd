@@ -115,14 +115,15 @@ fn init_tracing() -> Result<()> {
 }
 
 // ---- thin CLI wrappers — all real work goes through the daemon over IPC ----
-//
-// Step 2 exception: `cli_list` reads the SQLite DB directly. WAL mode lets
-// readers and the daemon writer coexist; Step 5 will revert this to IPC once
-// the named-pipe server lands.
 
 fn cli_list(cfg: &config::Config, limit: usize) -> Result<()> {
-    let rows = store::list(&cfg.db_full_path(), limit).context("listing entries")?;
-    print_rows(rows);
+    match daemon::ipc::client::send(cfg, daemon::ipc::Request::List { limit }) {
+        Ok(resp) => print_entries(resp),
+        Err(_) => {
+            // Daemon down: WAL mode lets a short-lived reader peek directly.
+            print_rows(store::list(&cfg.db_full_path(), limit)?);
+        }
+    }
     Ok(())
 }
 
@@ -139,20 +140,31 @@ fn cli_search(cfg: &config::Config, query: &str, limit: usize) -> Result<()> {
 }
 
 fn cli_delete(cfg: &config::Config, id: i64) -> Result<()> {
-    daemon::ipc::client::send(cfg, daemon::ipc::Request::Delete { id })?;
+    expect_ok(daemon::ipc::client::send(cfg, daemon::ipc::Request::Delete { id })?)?;
     println!("deleted #{id}");
     Ok(())
 }
 
 fn cli_pin(cfg: &config::Config, id: i64, pinned: bool) -> Result<()> {
-    daemon::ipc::client::send(cfg, daemon::ipc::Request::Pin { id, pinned })?;
+    expect_ok(daemon::ipc::client::send(
+        cfg,
+        daemon::ipc::Request::Pin { id, pinned },
+    )?)?;
     println!("{}: #{id}", if pinned { "pinned" } else { "unpinned" });
     Ok(())
 }
 
 fn cli_send(cfg: &config::Config, req: daemon::ipc::Request) -> Result<()> {
-    daemon::ipc::client::send(cfg, req)?;
+    expect_ok(daemon::ipc::client::send(cfg, req)?)?;
     Ok(())
+}
+
+fn expect_ok(resp: daemon::ipc::Response) -> Result<()> {
+    match resp {
+        daemon::ipc::Response::Ok | daemon::ipc::Response::Pong => Ok(()),
+        daemon::ipc::Response::Error(msg) => anyhow::bail!("{msg}"),
+        daemon::ipc::Response::Entries(_) => anyhow::bail!("unexpected Entries response"),
+    }
 }
 
 fn cli_doctor(cfg: &config::Config) -> Result<()> {

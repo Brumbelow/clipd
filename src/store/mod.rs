@@ -18,7 +18,7 @@ mod schema;
 
 use crate::store::crypto::Vault;
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::path::Path;
 
 pub struct NewEntry<'a> {
@@ -38,14 +38,12 @@ pub enum Outcome {
 
 pub struct EntryRow {
     pub id: i64,
-    // created_at: surfaced for Step 9 (date filters) and stable client display.
-    // size_bytes: surfaced for Step 12 (retention purge) and Step 13 (doctor stats).
-    #[allow(dead_code)]
     pub created_at: i64,
     pub last_seen: i64,
     pub kind: String,
     pub preview: String,
     pub pinned: bool,
+    // size_bytes: surfaced for Step 12 (retention purge) and Step 13 (doctor stats).
     #[allow(dead_code)]
     pub size_bytes: i64,
 }
@@ -154,6 +152,104 @@ pub fn list(db_path: &Path, limit: usize) -> Result<Vec<EntryRow>> {
         .context("executing list query")?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .context("collecting list rows")
+}
+
+/// Substring search over `preview` for Step 5 IPC. FTS5 lands in Step 9 — this
+/// is intentionally a `LIKE` scan. Previews are stored lowercased ([`derive_preview`]),
+/// so the query is lowercased before binding to keep the match case-insensitive.
+pub fn search(db_path: &Path, query: &str, limit: usize) -> Result<Vec<EntryRow>> {
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = open_ro(db_path)?;
+    let needle = query.to_lowercase();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, created_at, last_seen, kind, preview, pinned, size_bytes
+             FROM entries
+             WHERE preview LIKE '%' || ?1 || '%'
+             ORDER BY last_seen DESC
+             LIMIT ?2",
+        )
+        .context("preparing search statement")?;
+    let rows = stmt
+        .query_map(params![needle, limit as i64], |r| {
+            Ok(EntryRow {
+                id: r.get(0)?,
+                created_at: r.get(1)?,
+                last_seen: r.get(2)?,
+                kind: r.get(3)?,
+                preview: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                pinned: r.get::<_, i64>(5)? != 0,
+                size_bytes: r.get(6)?,
+            })
+        })
+        .context("executing search query")?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .context("collecting search rows")
+}
+
+/// Fetch a single entry by id, returning the row metadata and its decrypted
+/// content. Used by the IPC `Promote` handler.
+pub fn get_decrypted(
+    db_path: &Path,
+    vault: &Vault,
+    id: i64,
+) -> Result<Option<(EntryRow, Vec<u8>)>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let conn = open_ro(db_path)?;
+    let row = conn
+        .query_row(
+            "SELECT id, created_at, last_seen, kind, preview, pinned, size_bytes, content, nonce
+             FROM entries WHERE id = ?1",
+            params![id],
+            |r| {
+                let entry = EntryRow {
+                    id: r.get(0)?,
+                    created_at: r.get(1)?,
+                    last_seen: r.get(2)?,
+                    kind: r.get(3)?,
+                    preview: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    pinned: r.get::<_, i64>(5)? != 0,
+                    size_bytes: r.get(6)?,
+                };
+                let content: Vec<u8> = r.get(7)?;
+                let nonce: Vec<u8> = r.get(8)?;
+                Ok((entry, content, nonce))
+            },
+        )
+        .optional()
+        .context("get_decrypted query")?;
+    match row {
+        None => Ok(None),
+        Some((entry, ciphertext, nonce)) => {
+            let plaintext = vault.decrypt(&nonce, &ciphertext)?;
+            Ok(Some((entry, plaintext)))
+        }
+    }
+}
+
+/// Delete an entry by id. Returns `true` if a row was removed.
+pub fn delete(db_path: &Path, vault: &Vault, id: i64) -> Result<bool> {
+    let conn = open_or_init(db_path, vault)?;
+    let n = conn
+        .execute("DELETE FROM entries WHERE id = ?1", params![id])
+        .context("DELETE entries")?;
+    Ok(n > 0)
+}
+
+/// Set or clear the `pinned` flag. Returns `true` if a row matched.
+pub fn set_pinned(db_path: &Path, vault: &Vault, id: i64, pinned: bool) -> Result<bool> {
+    let conn = open_or_init(db_path, vault)?;
+    let n = conn
+        .execute(
+            "UPDATE entries SET pinned = ?1 WHERE id = ?2",
+            params![pinned as i64, id],
+        )
+        .context("UPDATE entries.pinned")?;
+    Ok(n > 0)
 }
 
 /// First 200 chars of `text`, lowercased, with every control char (\n, \r,
