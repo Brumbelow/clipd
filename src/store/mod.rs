@@ -1,19 +1,22 @@
 //! SQLite-backed clipboard entry store.
 //!
-//! Step 2 surface:
-//!   - `insert_or_bump` — write path with blake3 dedup.
-//!   - `list`           — read path for `clipd list`.
+//! Surface:
+//!   - `insert_or_bump` — write path with blake3 dedup. Encrypts `content`
+//!     with the process [`Vault`] before insert.
+//!   - `list`           — read path for `clipd list`. Does not touch
+//!     ciphertext — only `preview`, which is plaintext by design (Step 9
+//!     FTS5 indexes it).
+//!   - `open_or_init`   — connect, run schema migrations, run the v2
+//!     encryption sweep against any plaintext rows left from v1 DBs.
 //!
 //! WAL journal mode lets the daemon's writer coexist with read-only handles
 //! opened by short-lived `clipd list` invocations. Step 5 will replace the
 //! direct-DB read path with named-pipe IPC.
-//!
-//! Encryption is deferred: `content` is plaintext and `nonce` is a zero-byte
-//! BLOB until Step 4 wires `crypto::Vault` into insert/fetch.
 
 pub mod crypto;
 mod schema;
 
+use crate::store::crypto::Vault;
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OpenFlags};
 use std::path::Path;
@@ -47,18 +50,22 @@ pub struct EntryRow {
     pub size_bytes: i64,
 }
 
-fn open_rw(db_path: &Path) -> Result<Connection> {
+/// Open the DB read-write, run all migrations (DDL + crypto sweep), and
+/// return the connection. The vault is required because v2 needs to encrypt
+/// any plaintext rows carried over from a v1 DB.
+pub fn open_or_init(db_path: &Path, vault: &Vault) -> Result<Connection> {
     if let Some(parent) = db_path.parent() {
         std::fs::create_dir_all(parent).context("creating db parent dir")?;
     }
-    let conn = Connection::open(db_path).context("opening sqlite db")?;
+    let mut conn = Connection::open(db_path).context("opening sqlite db")?;
     conn.pragma_update(None, "journal_mode", "WAL")
         .context("enabling WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")
         .context("setting synchronous=NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .context("enabling foreign_keys")?;
-    schema::migrate(&conn).context("running migrations")?;
+    schema::migrate(&conn).context("running DDL migrations")?;
+    schema::migrate_v2_encryption(&mut conn, vault).context("running v2 encryption migration")?;
     Ok(conn)
 }
 
@@ -71,8 +78,8 @@ fn open_ro(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-pub fn insert_or_bump(db_path: &Path, e: &NewEntry) -> Result<Outcome> {
-    let conn = open_rw(db_path)?;
+pub fn insert_or_bump(db_path: &Path, vault: &Vault, e: &NewEntry) -> Result<Outcome> {
+    let conn = open_or_init(db_path, vault)?;
 
     let bumped = conn
         .execute(
@@ -91,15 +98,18 @@ pub fn insert_or_bump(db_path: &Path, e: &NewEntry) -> Result<Outcome> {
         return Ok(Outcome::BumpedLastSeen { id });
     }
 
+    let (nonce, ciphertext) = vault.encrypt(e.content).context("encrypting content")?;
+
     conn.execute(
         "INSERT INTO entries
             (created_at, last_seen, kind, content, nonce, preview,
              source_app, pinned, sensitive, hash, size_bytes, formats)
-         VALUES (?1, ?1, ?2, ?3, x'', ?4, ?5, 0, 0, ?6, ?7, NULL)",
+         VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, 0, 0, ?7, ?8, NULL)",
         params![
             e.created_at,
             e.kind,
-            e.content,
+            ciphertext,
+            nonce,
             e.preview,
             e.source_app,
             e.hash,
@@ -115,7 +125,8 @@ pub fn insert_or_bump(db_path: &Path, e: &NewEntry) -> Result<Outcome> {
 
 pub fn list(db_path: &Path, limit: usize) -> Result<Vec<EntryRow>> {
     // Daemon hasn't started yet, or hasn't captured anything: empty result is
-    // a better UX than an error.
+    // a better UX than an error. `list` does not need a Vault — `content` and
+    // `nonce` are not in the projection.
     if !db_path.exists() {
         return Ok(Vec::new());
     }
@@ -166,10 +177,22 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn fixture() -> (TempDir, std::path::PathBuf) {
+    struct Fix {
+        _dir: TempDir,
+        db: std::path::PathBuf,
+        vault: Vault,
+    }
+
+    fn fixture() -> Fix {
         let dir = TempDir::new().unwrap();
-        let p = dir.path().join("test.db");
-        (dir, p)
+        let db = dir.path().join("test.db");
+        let key = dir.path().join("k.dpapi");
+        let vault = Vault::open(&key).unwrap();
+        Fix {
+            _dir: dir,
+            db,
+            vault,
+        }
     }
 
     fn new_text<'a>(text: &'a str, hash: &'a [u8], t: i64) -> NewEntry<'a> {
@@ -186,8 +209,8 @@ mod tests {
 
     #[test]
     fn open_and_migrate_creates_entries_table() {
-        let (_d, p) = fixture();
-        let conn = open_rw(&p).unwrap();
+        let f = fixture();
+        let conn = open_or_init(&f.db, &f.vault).unwrap();
         let count: i64 = conn
             .query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='entries'",
@@ -199,28 +222,30 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 1);
+        // Empty DB jumps straight to v2 since the v2 sweep is a no-op when
+        // there are no plaintext rows.
+        assert_eq!(v, 2);
     }
 
     #[test]
     fn migrate_is_idempotent() {
-        let (_d, p) = fixture();
-        let _ = open_rw(&p).unwrap();
-        let _ = open_rw(&p).unwrap();
-        let _ = open_rw(&p).unwrap();
+        let f = fixture();
+        let _ = open_or_init(&f.db, &f.vault).unwrap();
+        let _ = open_or_init(&f.db, &f.vault).unwrap();
+        let _ = open_or_init(&f.db, &f.vault).unwrap();
     }
 
     #[test]
     fn insert_then_list_roundtrip() {
-        let (_d, p) = fixture();
+        let f = fixture();
         let h1 = blake3::hash(b"alpha");
         let h2 = blake3::hash(b"bravo");
         let h3 = blake3::hash(b"charlie");
-        insert_or_bump(&p, &new_text("alpha", h1.as_bytes(), 1000)).unwrap();
-        insert_or_bump(&p, &new_text("bravo", h2.as_bytes(), 2000)).unwrap();
-        insert_or_bump(&p, &new_text("charlie", h3.as_bytes(), 3000)).unwrap();
+        insert_or_bump(&f.db, &f.vault, &new_text("alpha", h1.as_bytes(), 1000)).unwrap();
+        insert_or_bump(&f.db, &f.vault, &new_text("bravo", h2.as_bytes(), 2000)).unwrap();
+        insert_or_bump(&f.db, &f.vault, &new_text("charlie", h3.as_bytes(), 3000)).unwrap();
 
-        let rows = list(&p, 50).unwrap();
+        let rows = list(&f.db, 50).unwrap();
         assert_eq!(rows.len(), 3);
         // Ordered by last_seen DESC.
         assert_eq!(rows[0].preview, "charlie");
@@ -233,21 +258,21 @@ mod tests {
 
     #[test]
     fn duplicate_hash_bumps_last_seen() {
-        let (_d, p) = fixture();
+        let f = fixture();
         let h = blake3::hash(b"once");
-        let r1 = insert_or_bump(&p, &new_text("once", h.as_bytes(), 1000)).unwrap();
+        let r1 = insert_or_bump(&f.db, &f.vault, &new_text("once", h.as_bytes(), 1000)).unwrap();
         let id1 = match r1 {
             Outcome::Inserted { id } => id,
             _ => panic!("expected Inserted"),
         };
-        let r2 = insert_or_bump(&p, &new_text("once", h.as_bytes(), 5000)).unwrap();
+        let r2 = insert_or_bump(&f.db, &f.vault, &new_text("once", h.as_bytes(), 5000)).unwrap();
         let id2 = match r2 {
             Outcome::BumpedLastSeen { id } => id,
             _ => panic!("expected BumpedLastSeen"),
         };
         assert_eq!(id1, id2);
 
-        let rows = list(&p, 50).unwrap();
+        let rows = list(&f.db, 50).unwrap();
         assert_eq!(rows.len(), 1, "dedup must not add a row");
         assert_eq!(rows[0].created_at, 1000, "created_at preserved");
         assert_eq!(rows[0].last_seen, 5000, "last_seen bumped");
@@ -255,26 +280,31 @@ mod tests {
 
     #[test]
     fn list_respects_limit() {
-        let (_d, p) = fixture();
+        let f = fixture();
         for i in 0..10 {
             let s = format!("line-{i}");
             let h = blake3::hash(s.as_bytes());
-            insert_or_bump(&p, &new_text(&s, h.as_bytes(), 1000 + i as i64)).unwrap();
+            insert_or_bump(
+                &f.db,
+                &f.vault,
+                &new_text(&s, h.as_bytes(), 1000 + i as i64),
+            )
+            .unwrap();
         }
-        assert_eq!(list(&p, 3).unwrap().len(), 3);
-        assert_eq!(list(&p, 100).unwrap().len(), 10);
+        assert_eq!(list(&f.db, 3).unwrap().len(), 3);
+        assert_eq!(list(&f.db, 100).unwrap().len(), 10);
     }
 
     #[test]
     fn list_dedup_orders_by_last_seen() {
-        let (_d, p) = fixture();
+        let f = fixture();
         let ha = blake3::hash(b"a");
         let hb = blake3::hash(b"b");
-        insert_or_bump(&p, &new_text("a", ha.as_bytes(), 1000)).unwrap();
-        insert_or_bump(&p, &new_text("b", hb.as_bytes(), 2000)).unwrap();
+        insert_or_bump(&f.db, &f.vault, &new_text("a", ha.as_bytes(), 1000)).unwrap();
+        insert_or_bump(&f.db, &f.vault, &new_text("b", hb.as_bytes(), 2000)).unwrap();
         // Re-copy "a" later — should float to the top.
-        insert_or_bump(&p, &new_text("a", ha.as_bytes(), 3000)).unwrap();
-        let rows = list(&p, 50).unwrap();
+        insert_or_bump(&f.db, &f.vault, &new_text("a", ha.as_bytes(), 3000)).unwrap();
+        let rows = list(&f.db, 50).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].preview, "a");
         assert_eq!(rows[0].last_seen, 3000);
@@ -293,5 +323,146 @@ mod tests {
     fn derive_preview_truncates_at_200_chars() {
         let long: String = "a".repeat(300);
         assert_eq!(derive_preview(&long).chars().count(), 200);
+    }
+
+    // ---- Step 4 encryption tests ----
+
+    #[test]
+    fn encrypt_on_insert() {
+        let f = fixture();
+        let plaintext = b"super secret clipboard payload";
+        let h = blake3::hash(plaintext);
+        insert_or_bump(
+            &f.db,
+            &f.vault,
+            &new_text(std::str::from_utf8(plaintext).unwrap(), h.as_bytes(), 1000),
+        )
+        .unwrap();
+
+        let conn = open_ro(&f.db).unwrap();
+        let (content, nonce): (Vec<u8>, Vec<u8>) = conn
+            .query_row("SELECT content, nonce FROM entries LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_ne!(content.as_slice(), plaintext, "content must be ciphertext");
+        assert_eq!(nonce.len(), 12, "AES-GCM nonce is 12 bytes");
+        assert!(
+            content.len() >= plaintext.len() + 16,
+            "ciphertext+tag must be at least plaintext + 16-byte GCM tag"
+        );
+    }
+
+    #[test]
+    fn decrypt_roundtrip() {
+        let f = fixture();
+        let plaintext = b"roundtrip me";
+        let h = blake3::hash(plaintext);
+        insert_or_bump(
+            &f.db,
+            &f.vault,
+            &new_text(std::str::from_utf8(plaintext).unwrap(), h.as_bytes(), 1000),
+        )
+        .unwrap();
+
+        let conn = open_ro(&f.db).unwrap();
+        let (content, nonce): (Vec<u8>, Vec<u8>) = conn
+            .query_row("SELECT content, nonce FROM entries LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        let recovered = f.vault.decrypt(&nonce, &content).unwrap();
+        assert_eq!(recovered.as_slice(), plaintext);
+    }
+
+    #[test]
+    fn migrate_v1_to_v2_encrypts_existing_rows() {
+        let f = fixture();
+        // Stand up a v1 DB by hand: run only the DDL migrations, then INSERT
+        // a plaintext row with `nonce = x''` to mimic a pre-Step-4 DB.
+        {
+            let conn = Connection::open(&f.db).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            schema::migrate(&conn).unwrap();
+            // Schema migrate moved us to v1. Force back to v1 just to be
+            // explicit about the test's starting state.
+            conn.execute_batch("PRAGMA user_version = 1").unwrap();
+            let plaintext = b"legacy plaintext row";
+            let h = blake3::hash(plaintext);
+            conn.execute(
+                "INSERT INTO entries
+                    (created_at, last_seen, kind, content, nonce, preview,
+                     source_app, pinned, sensitive, hash, size_bytes, formats)
+                 VALUES (?1, ?1, 'text', ?2, x'', ?3, NULL, 0, 0, ?4, ?5, NULL)",
+                params![
+                    1000_i64,
+                    plaintext.as_slice(),
+                    "legacy plaintext row",
+                    h.as_bytes(),
+                    plaintext.len() as i64,
+                ],
+            )
+            .unwrap();
+        }
+
+        // Re-open with `open_or_init` — the v2 sweep should encrypt the row.
+        let _ = open_or_init(&f.db, &f.vault).unwrap();
+
+        let conn = open_ro(&f.db).unwrap();
+        let v: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, 2);
+        let (content, nonce): (Vec<u8>, Vec<u8>) = conn
+            .query_row("SELECT content, nonce FROM entries LIMIT 1", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(nonce.len(), 12, "v2 sweep must stamp a 12-byte nonce");
+        assert_ne!(
+            content.as_slice(),
+            b"legacy plaintext row".as_slice(),
+            "v2 sweep must replace plaintext with ciphertext"
+        );
+        let recovered = f.vault.decrypt(&nonce, &content).unwrap();
+        assert_eq!(recovered.as_slice(), b"legacy plaintext row");
+    }
+
+    #[test]
+    fn dedup_still_works_under_encryption() {
+        let f = fixture();
+        let plaintext = "duplicate me";
+        let h = blake3::hash(plaintext.as_bytes());
+        let r1 = insert_or_bump(&f.db, &f.vault, &new_text(plaintext, h.as_bytes(), 1000)).unwrap();
+        let id1 = match r1 {
+            Outcome::Inserted { id } => id,
+            _ => panic!("first insert should be Inserted"),
+        };
+        // Second insert: same plaintext → same blake3 → dedup. Note the new
+        // call would otherwise produce a fresh nonce + ciphertext, but the
+        // hash-based dedup short-circuits before encryption.
+        let r2 = insert_or_bump(&f.db, &f.vault, &new_text(plaintext, h.as_bytes(), 5000)).unwrap();
+        let id2 = match r2 {
+            Outcome::BumpedLastSeen { id } => id,
+            _ => panic!("second insert should be BumpedLastSeen"),
+        };
+        assert_eq!(id1, id2);
+
+        // Confirm exactly one row, last_seen bumped, content still decrypts.
+        let conn = open_ro(&f.db).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT count(*) FROM entries", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let (content, nonce, last_seen): (Vec<u8>, Vec<u8>, i64) = conn
+            .query_row(
+                "SELECT content, nonce, last_seen FROM entries LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(last_seen, 5000);
+        let recovered = f.vault.decrypt(&nonce, &content).unwrap();
+        assert_eq!(recovered.as_slice(), plaintext.as_bytes());
     }
 }

@@ -6,20 +6,23 @@ use crate::daemon::{capture, DaemonState};
 use anyhow::{anyhow, bail, Context, Result};
 use once_cell::sync::OnceCell;
 use tracing::{debug, error, info, warn};
-use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::core::{PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, RemoveClipboardFormatListener,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetForegroundWindow, GetMessageW,
-    GetWindowTextLengthW, GetWindowTextW, PostQuitMessage, RegisterClassExW, TranslateMessage,
-    HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLIPBOARDUPDATE, WM_DESTROY,
-    WM_HOTKEY, WNDCLASSEXW,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, PostQuitMessage,
+    RegisterClassExW, TranslateMessage, HMENU, HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_CLIPBOARDUPDATE, WM_DESTROY, WM_HOTKEY, WNDCLASSEXW,
 };
 
 const HOTKEY_ID: i32 = 0xC11D; // "clip d"
@@ -131,10 +134,8 @@ unsafe extern "system" fn wnd_proc(
                 if state.is_paused() {
                     debug!("clipboard update ignored (paused)");
                 } else {
-                    let foreground_title = foreground_window_title();
-                    if let Err(e) =
-                        capture::handle_clipboard_update(state, foreground_title.as_deref())
-                    {
+                    let fg = read_foreground_info();
+                    if let Err(e) = capture::handle_clipboard_update(state, &fg) {
                         warn!("capture failed: {e:#}");
                     }
                 }
@@ -160,28 +161,84 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 
-fn foreground_window_title() -> Option<String> {
-    // SAFETY: GetForegroundWindow returns the current foreground HWND or NULL.
-    let hwnd = unsafe { GetForegroundWindow() };
+fn window_title(hwnd: HWND) -> Option<String> {
     if hwnd.0.is_null() {
         return None;
     }
-
-    // SAFETY: hwnd came from GetForegroundWindow. A zero length means no title
-    // or inaccessible title; both are non-fatal for capture.
+    // SAFETY: hwnd is non-null. Zero/negative length means no title or
+    // inaccessible — non-fatal.
     let len = unsafe { GetWindowTextLengthW(hwnd) };
     if len <= 0 {
         return None;
     }
-
     let mut buf = vec![0u16; len as usize + 1];
     // SAFETY: buf is writable and includes room for the trailing NUL.
     let copied = unsafe { GetWindowTextW(hwnd, &mut buf) };
     if copied <= 0 {
         return None;
     }
-
     Some(String::from_utf16_lossy(&buf[..copied as usize]))
+}
+
+fn window_pid(hwnd: HWND) -> Option<u32> {
+    if hwnd.0.is_null() {
+        return None;
+    }
+    let mut pid: u32 = 0;
+    // SAFETY: hwnd non-null; pid is a valid out-pointer.
+    let tid = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if tid == 0 {
+        None
+    } else {
+        Some(pid)
+    }
+}
+
+fn process_image_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    // SAFETY: PROCESS_QUERY_LIMITED_INFORMATION is the minimum-privilege right
+    // for path queries. Returns Err on access denial; we propagate via `ok()?`.
+    let handle: HANDLE =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, BOOL(0), pid) }.ok()?;
+    let mut buf = [0u16; 1024];
+    let mut size: u32 = buf.len() as u32;
+    // SAFETY: handle valid; buf and size pointers valid for the call duration.
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        )
+    };
+    // SAFETY: handle came from OpenProcess; must close to avoid handle leak.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    result.ok()?;
+    Some(String::from_utf16_lossy(&buf[..size as usize]))
+}
+
+/// Foreground-window context used by the secrets layer's password-manager and
+/// browser-extension-popup heuristics.
+pub struct ForegroundInfo {
+    pub title: Option<String>,
+    pub image: Option<String>,
+}
+
+/// Read the foreground window's title and the full path of its owning
+/// executable. Both feed `secrets::classify` — the title drives the
+/// password-manager regex, the image powers the browser-extension-popup
+/// heuristic.
+fn read_foreground_info() -> ForegroundInfo {
+    // SAFETY: GetForegroundWindow returns NULL or a valid HWND.
+    let hwnd = unsafe { GetForegroundWindow() };
+    ForegroundInfo {
+        title: window_title(hwnd),
+        image: window_pid(hwnd).and_then(process_image_name),
+    }
 }
 
 /// Spawn `clipd pick` as a subprocess. Picker connects back over IPC.

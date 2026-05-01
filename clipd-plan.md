@@ -115,15 +115,26 @@ CREATE VIRTUAL TABLE entries_fts USING fts5(
    registered format. Bitwarden, 1Password, KeePass, modern browsers set this.
 2. Clipboard payload includes `CanIncludeInClipboardHistory` = 0.
 3. Foreground window title at capture time matches `(?i)(password|vault|1password|bitwarden|keepass|lastpass)`.
-4. Content matches a known-secret pattern:
+4. Foreground process is a Chromium/Firefox-family browser AND its window has
+   no caption text. This is the live signature of a browser-extension password
+   manager (Bitwarden / 1Password / Dashlane / LastPass / KeePass) at the
+   moment it writes the clipboard — Chromium does not expose
+   `ExcludeClipboardContentFromMonitoring` to extensions, so #1 misses them.
+   Legitimate page-content copies surface the tab title; right-click context
+   menu copies surface the tab title too (the menu has closed by the time the
+   `WM_CLIPBOARDUPDATE` handler runs).
+5. Content matches a known-secret pattern:
    - `sk-[A-Za-z0-9]{20,}` (OpenAI-style)
    - `ghp_[A-Za-z0-9]{36}` (GitHub PAT)
    - `xox[bpars]-[A-Za-z0-9-]{10,}` (Slack)
    - `AKIA[0-9A-Z]{16}` (AWS access key)
    - JWT structure (3 base64url segments separated by `.`)
    - PEM block headers (`-----BEGIN ... PRIVATE KEY-----`)
-5. Content is a single token of length 20–80, no whitespace, with
-   Shannon entropy > 4.5 bits/char.
+6. Content is a single token of length 20–80, no whitespace, with
+   Shannon entropy > 4.5 bits/char. URLs (anything starting with `http://`
+   or `https://`) bypass this gate — pre-signed URLs and embedded credentials
+   are caught by #5 already, and YouTube-style URLs trip the entropy gate
+   without being credentials.
 
 Default: **skip storage entirely** for matches. User can opt into "store but
 mark sensitive" in `config.toml`. Sensitive entries are never auto-promoted
@@ -140,21 +151,21 @@ needed — we test the format-detection layer in isolation).
 
 Acceptance criteria are testable.
 
-### Step 1 — Win32 plumbing
+### Step 1 — Win32 plumbing ✅
 - Message-only window with `wnd_proc`.
 - `AddClipboardFormatListener` registered.
 - `RegisterHotKey` for `Ctrl+Alt+C`.
 - **Accept:** running `clipd --daemon` logs every clipboard change and prints
   `hotkey!` when chord is pressed.
 
-### Step 2 — Storage
+### Step 2 — Storage ✅
 - SQLite open / migrate / insert path.
 - blake3 dedup; on duplicate, bump `last_seen` instead of inserting.
 - `clipd list` subcommand prints last 50 entries.
 - **Accept:** copy 5 things, run `clipd list`, see 5 entries; copy the same
   thing twice, see 1 entry with updated `last_seen`.
 
-### Step 3 — Sensitive detection
+### Step 3 — Sensitive detection ✅
 - `secrets::is_sensitive(payload, foreground_title) -> Decision`.
 - Format-flag check for `ExcludeClipboardContentFromMonitoring`.
 - Regex + entropy heuristics.
@@ -162,7 +173,7 @@ Acceptance criteria are testable.
   PEM block, plain English text (must NOT match), random hex hash
   (configurable — default skip).
 
-### Step 4 — Encryption at rest
+### Step 4 — Encryption at rest ✅
 - `store::crypto::Vault` — DPAPI-wrap AES-GCM key on first run.
 - Encrypt on insert, decrypt on read.
 - **Accept:** open `entries.db` in DB Browser for SQLite from a different

@@ -9,11 +9,6 @@
 //!   - Stored as DPAPI-protected blob at `key.dpapi`.
 //!   - Tied to the current Windows user via `CryptProtectData`.
 
-// Wired into `store::insert_or_bump` / `store::list` in Step 4. Tests cover
-// roundtrip + persistence + tamper today; binary build sees it as dead code
-// until then.
-#![allow(dead_code)]
-
 use aes_gcm::aead::Aead;
 
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
@@ -79,6 +74,9 @@ impl Vault {
         Ok((nonce_bytes.to_vec(), ct))
     }
 
+    // Wired into the IPC `get` / promote path (Step 5/6). Until then the
+    // binary build sees this as dead; tests cover the AEAD invariants.
+    #[allow(dead_code)]
     pub fn decrypt(&self, nonce: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>> {
         if nonce.len() != NONCE_BYTES {
             return Err(anyhow!(

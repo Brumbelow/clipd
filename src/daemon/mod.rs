@@ -10,7 +10,8 @@ pub mod ipc;
 pub mod win_hook;
 
 use crate::config::Config;
-use anyhow::Result;
+use crate::store::crypto::Vault;
+use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -18,13 +19,15 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct DaemonState {
     pub cfg: Arc<Config>,
+    pub vault: Arc<Vault>,
     paused: Arc<RwLock<bool>>,
 }
 
 impl DaemonState {
-    pub fn new(cfg: Arc<Config>) -> Self {
+    pub fn new(cfg: Arc<Config>, vault: Arc<Vault>) -> Self {
         Self {
             cfg,
+            vault,
             paused: Arc::new(RwLock::new(false)),
         }
     }
@@ -41,6 +44,8 @@ impl DaemonState {
 
 /// Daemon entrypoint. Blocks on the Win32 message pump until WM_QUIT.
 pub fn run(cfg: Config) -> Result<()> {
-    let state = DaemonState::new(Arc::new(cfg));
+    let key_path = cfg.key_full_path();
+    let vault = Vault::open(&key_path).context("opening clipd vault (DPAPI key)")?;
+    let state = DaemonState::new(Arc::new(cfg), Arc::new(vault));
     win_hook::run(state)
 }

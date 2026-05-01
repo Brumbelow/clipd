@@ -6,6 +6,7 @@
 //! **Logging contract (AGENTS rule 8/123):** metadata only. Never log
 //! preview text, content bytes, hashes, or other content-derived values.
 
+use crate::daemon::win_hook::ForegroundInfo;
 use crate::daemon::DaemonState;
 use crate::secrets::{self, Reason, Verdict};
 use crate::store;
@@ -22,7 +23,7 @@ enum ClipboardHistoryFlag {
     Deny,
 }
 
-pub fn handle_clipboard_update(state: &DaemonState, foreground_title: Option<&str>) -> Result<()> {
+pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Result<()> {
     let _clip = match Clipboard::new_attempts(10) {
         Ok(clip) => clip,
         Err(e) => {
@@ -34,13 +35,8 @@ pub fn handle_clipboard_update(state: &DaemonState, foreground_title: Option<&st
 
     let had_exclude_flag = has_registered_format(EXCLUDE_FORMAT);
     let history_flag = read_clipboard_history_flag();
-    if let Some(reason) = skip_reason(
-        None,
-        foreground_title,
-        had_exclude_flag,
-        history_flag,
-        &state.cfg.secrets,
-    ) {
+    if let Some(reason) = skip_reason(None, fg, had_exclude_flag, history_flag, &state.cfg.secrets)
+    {
         log_skip("unknown", None, reason);
         return Ok(());
     }
@@ -64,7 +60,7 @@ pub fn handle_clipboard_update(state: &DaemonState, foreground_title: Option<&st
 
     if let Some(reason) = skip_reason(
         Some(&text),
-        foreground_title,
+        fg,
         had_exclude_flag,
         history_flag,
         &state.cfg.secrets,
@@ -81,6 +77,7 @@ pub fn handle_clipboard_update(state: &DaemonState, foreground_title: Option<&st
     let now_ms = chrono::Utc::now().timestamp_millis();
     let outcome = store::insert_or_bump(
         &state.cfg.db_full_path(),
+        &state.vault,
         &store::NewEntry {
             kind: "text",
             content: bytes,
@@ -149,7 +146,7 @@ fn parse_clipboard_history_flag(bytes: Option<&[u8]>) -> ClipboardHistoryFlag {
 
 fn skip_reason(
     text: Option<&str>,
-    foreground_title: Option<&str>,
+    fg: &ForegroundInfo,
     had_exclude_flag: bool,
     history_flag: ClipboardHistoryFlag,
     cfg: &crate::config::SecretsConfig,
@@ -161,8 +158,14 @@ fn skip_reason(
         return Some(Reason::ClipboardHistoryDisabled);
     }
 
+    // Browser-extension-popup signal does not depend on text contents — fire
+    // even on the pre-text-fetch first pass so we skip cleanly.
+    if secrets::is_browser_extension_popup_signal(fg.title.as_deref(), fg.image.as_deref()) {
+        return Some(Reason::BrowserExtensionPopup);
+    }
+
     let text = text?;
-    match secrets::classify(text, foreground_title, false, cfg) {
+    match secrets::classify(text, fg.title.as_deref(), fg.image.as_deref(), false, cfg) {
         Verdict::Ok => None,
         Verdict::Sensitive(reason) => Some(reason),
     }
@@ -183,6 +186,20 @@ fn log_skip(kind: &str, size_bytes: Option<usize>, reason: Reason) {
 mod tests {
     use super::*;
     use crate::config::SecretsConfig;
+
+    fn fg_none() -> ForegroundInfo {
+        ForegroundInfo {
+            title: None,
+            image: None,
+        }
+    }
+
+    fn fg(title: Option<&str>, image: Option<&str>) -> ForegroundInfo {
+        ForegroundInfo {
+            title: title.map(str::to_string),
+            image: image.map(str::to_string),
+        }
+    }
 
     #[test]
     fn history_flag_missing_allows_storage() {
@@ -222,7 +239,7 @@ mod tests {
         assert_eq!(
             skip_reason(
                 Some("plain text"),
-                None,
+                &fg_none(),
                 true,
                 ClipboardHistoryFlag::Missing,
                 &cfg
@@ -232,7 +249,7 @@ mod tests {
         assert_eq!(
             skip_reason(
                 Some("plain text"),
-                None,
+                &fg_none(),
                 false,
                 ClipboardHistoryFlag::Deny,
                 &cfg
@@ -247,7 +264,7 @@ mod tests {
         assert_eq!(
             skip_reason(
                 Some("hello world"),
-                Some("Personal Password Vault"),
+                &fg(Some("Personal Password Vault"), None),
                 false,
                 ClipboardHistoryFlag::Missing,
                 &cfg
@@ -257,12 +274,53 @@ mod tests {
         assert_eq!(
             skip_reason(
                 Some("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-                None,
+                &fg_none(),
                 false,
                 ClipboardHistoryFlag::Missing,
                 &cfg
             ),
             Some(Reason::KnownSecretPattern)
+        );
+    }
+
+    #[test]
+    fn skip_reason_catches_browser_extension_popup_pre_text() {
+        // First skip-reason pass (text=None) must already detect the
+        // browser-extension-popup signal so the daemon never even reads the
+        // CF_UNICODETEXT payload from a Bitwarden popup.
+        let cfg = SecretsConfig::default();
+        assert_eq!(
+            skip_reason(
+                None,
+                &fg(
+                    None,
+                    Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+                ),
+                false,
+                ClipboardHistoryFlag::Missing,
+                &cfg
+            ),
+            Some(Reason::BrowserExtensionPopup)
+        );
+    }
+
+    #[test]
+    fn skip_reason_passes_browser_with_titled_window() {
+        // Wikipedia Ctrl+C: msedge.exe + non-empty title → must NOT be flagged
+        // as a popup.
+        let cfg = SecretsConfig::default();
+        assert_eq!(
+            skip_reason(
+                Some("the quick brown fox"),
+                &fg(
+                    Some("Article Title - Wikipedia and 4 more pages - Microsoft Edge"),
+                    Some(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+                ),
+                false,
+                ClipboardHistoryFlag::Missing,
+                &cfg
+            ),
+            None
         );
     }
 }
