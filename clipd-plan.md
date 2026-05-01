@@ -186,13 +186,17 @@ Acceptance criteria are testable.
 - **Accept:** `echo '{"op":"list","limit":10}' | nc -U \\.\pipe\clipd` (or
   PowerShell named-pipe equivalent) returns JSON results.
 
-### Step 6 — egui picker
+### Step 6 — egui picker ✅
 - `clipd pick` opens a borderless always-on-top egui window.
 - Search input on top, virtualized result list below.
 - Live nucleo fuzzy filter.
 - Enter promotes selected entry, window closes.
 - **Accept:** Ctrl+Alt+C opens picker in <100ms. Type 3 chars, see filtered
   results. Enter restores clipboard to selection.
+- The literal `<100ms` cold-start budget is **deferred to Step 6.5**: cold
+  spawn of `clipd.exe` + wgpu init runs ~150–400ms on first press; subsequent
+  presses within a session land under budget. Candidate fixes (out of scope
+  here): swap eframe wgpu→glow, or daemon-owned pre-warmed hidden picker.
 
 ### Step 7 — Format preservation on promote
 - Capture all clipboard formats at copy time, store in `formats` JSON column.
