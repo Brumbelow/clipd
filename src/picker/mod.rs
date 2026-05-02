@@ -9,8 +9,13 @@ mod app;
 use crate::config::Config;
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Instant;
 
 pub fn run(cfg: Config) -> Result<()> {
+    // Measures eframe init + first-paint — the part Step 6.5's wgpu→glow swap
+    // is targeting. Process spawn + arg parse + config load happen before this
+    // and are tracked as residual in the SESSION_LOG.
+    let started_at = Instant::now();
     let cfg = Arc::new(cfg);
     let viewport = egui::ViewportBuilder::default()
         .with_title("clipd")
@@ -30,7 +35,7 @@ pub fn run(cfg: Config) -> Result<()> {
     eframe::run_native(
         "clipd",
         options,
-        Box::new(move |_cc| Ok(Box::new(app::PickerApp::new(cfg.clone())))),
+        Box::new(move |_cc| Ok(Box::new(app::PickerApp::new(cfg.clone(), started_at)))),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
 }

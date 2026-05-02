@@ -13,9 +13,7 @@ use crate::daemon::ipc::{to_summary, Request, Response};
 use crate::daemon::{clipboard, DaemonState};
 use crate::store;
 use anyhow::{Context, Result};
-use interprocess::local_socket::{
-    prelude::*, GenericNamespaced, ListenerOptions, Stream,
-};
+use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions, Stream};
 use std::io::{BufRead, BufReader, Write};
 use tracing::{debug, info, warn};
 
@@ -128,9 +126,7 @@ fn dispatch(req: Request, state: &DaemonState) -> Response {
 
 fn promote(kind: &str, plaintext: &[u8]) -> Response {
     if kind != "text" {
-        return Response::Error(format!(
-            "non-text promote (kind={kind}) requires Step 7"
-        ));
+        return Response::Error(format!("non-text promote (kind={kind}) requires Step 7"));
     }
     match std::str::from_utf8(plaintext) {
         Err(_) => Response::Error("text entry has invalid UTF-8".into()),
@@ -174,7 +170,11 @@ mod tests {
         // named pipes Stream::connect can fail with ERROR_PIPE_BUSY if the
         // first ConnectNamedPipe hasn't run yet.
         std::thread::sleep(std::time::Duration::from_millis(20));
-        Fix { _dir: dir, pipe, state }
+        Fix {
+            _dir: dir,
+            pipe,
+            state,
+        }
     }
 
     fn insert_text(state: &DaemonState, text: &str, t: i64) -> i64 {
@@ -236,7 +236,10 @@ mod tests {
 
         let resp = client::send_to(
             &f.pipe,
-            Request::Search { query: "kube".into(), limit: 10 },
+            Request::Search {
+                query: "kube".into(),
+                limit: 10,
+            },
         )
         .unwrap();
         let v = entries(resp);
@@ -257,7 +260,14 @@ mod tests {
         assert!(v[0].pinned);
 
         // Pinning a missing id reports not-found, listener stays alive.
-        let resp = client::send_to(&f.pipe, Request::Pin { id: 9999, pinned: true }).unwrap();
+        let resp = client::send_to(
+            &f.pipe,
+            Request::Pin {
+                id: 9999,
+                pinned: true,
+            },
+        )
+        .unwrap();
         assert!(matches!(resp, Response::Error(ref m) if m.contains("not found")));
     }
 

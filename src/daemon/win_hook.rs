@@ -323,6 +323,13 @@ mod tests {
     }
 
     #[test]
+    fn parse_default_win_alt_c_chord() {
+        let (mods, vk) = parse_chord("win+alt+c").unwrap();
+        assert_eq!(mods, MOD_WIN | MOD_ALT);
+        assert_eq!(vk, b'C' as u32);
+    }
+
+    #[test]
     fn parse_with_shift_and_function_key() {
         let (mods, vk) = parse_chord("ctrl+shift+f9").unwrap();
         assert_eq!(mods, MOD_CONTROL | MOD_SHIFT);

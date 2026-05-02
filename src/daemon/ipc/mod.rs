@@ -66,8 +66,8 @@ pub mod client {
         let pipe_name = name
             .to_ns_name::<GenericNamespaced>()
             .with_context(|| format!("invalid pipe name: {name}"))?;
-        let stream = Stream::connect(pipe_name)
-            .context("connecting to clipd daemon (is it running?)")?;
+        let stream =
+            Stream::connect(pipe_name).context("connecting to clipd daemon (is it running?)")?;
         let mut reader = BufReader::new(stream);
 
         let body = serde_json::to_string(&req)?;

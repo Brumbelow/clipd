@@ -28,8 +28,12 @@ pub struct HotkeyConfig {
 }
 impl Default for HotkeyConfig {
     fn default() -> Self {
+        // Win+Alt+C: avoids the Win+C collision with Windows Copilot while
+        // staying close to "Win+C" muscle memory. RegisterHotKey treats both
+        // Alt keys the same (MOD_ALT) — left/right differentiation would
+        // need a WH_KEYBOARD_LL hook.
         Self {
-            chord: "ctrl+alt+c".into(),
+            chord: "win+alt+c".into(),
         }
     }
 }

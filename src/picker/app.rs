@@ -13,6 +13,7 @@ use crate::daemon::ipc::{self, EntrySummary, Request, Response};
 use eframe::App;
 use std::sync::Arc;
 use std::time::Instant;
+use tracing::info;
 
 pub struct PickerApp {
     cfg: Arc<Config>,
@@ -24,10 +25,12 @@ pub struct PickerApp {
     last_query_at: Instant,
     needs_refresh: bool,
     focused_once: bool,
+    started_at: Instant,
+    first_frame_logged: bool,
 }
 
 impl PickerApp {
-    pub fn new(cfg: Arc<Config>) -> Self {
+    pub fn new(cfg: Arc<Config>, started_at: Instant) -> Self {
         let mut s = Self {
             cfg,
             query: String::new(),
@@ -38,6 +41,8 @@ impl PickerApp {
             last_query_at: Instant::now(),
             needs_refresh: true,
             focused_once: false,
+            started_at,
+            first_frame_logged: false,
         };
         s.refresh();
         s
@@ -109,6 +114,13 @@ impl PickerApp {
 
 impl App for PickerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.first_frame_logged {
+            self.first_frame_logged = true;
+            info!(
+                "picker cold-start to first frame: {}ms",
+                self.started_at.elapsed().as_millis()
+            );
+        }
         // Debounced search refresh: 80ms after last keystroke.
         if self.query != self.last_query
             && self.last_query_at.elapsed() >= std::time::Duration::from_millis(80)

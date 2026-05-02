@@ -52,7 +52,7 @@ Two-process model, one binary:
 
 - `AddClipboardFormatListener` on a message-only window (`HWND_MESSAGE` parent).
 - Single message pump handles `WM_CLIPBOARDUPDATE` and `WM_HOTKEY`.
-- `RegisterHotKey` for the configured chord (default `Ctrl+Alt+C`).
+- `RegisterHotKey` for the configured chord (default `Win+Alt+C`).
 - IPC server runs on a separate thread with blocking `interprocess` named pipe.
 
 ### Storage
@@ -154,7 +154,7 @@ Acceptance criteria are testable.
 ### Step 1 — Win32 plumbing ✅
 - Message-only window with `wnd_proc`.
 - `AddClipboardFormatListener` registered.
-- `RegisterHotKey` for `Ctrl+Alt+C`.
+- `RegisterHotKey` for `Win+Alt+C` (default; configurable).
 - **Accept:** running `clipd --daemon` logs every clipboard change and prints
   `hotkey!` when chord is pressed.
 
@@ -191,12 +191,29 @@ Acceptance criteria are testable.
 - Search input on top, virtualized result list below.
 - Live nucleo fuzzy filter.
 - Enter promotes selected entry, window closes.
-- **Accept:** Ctrl+Alt+C opens picker in <100ms. Type 3 chars, see filtered
+- **Accept:** Win+Alt+C opens picker in <100ms. Type 3 chars, see filtered
   results. Enter restores clipboard to selection.
 - The literal `<100ms` cold-start budget is **deferred to Step 6.5**: cold
   spawn of `clipd.exe` + wgpu init runs ~150–400ms on first press; subsequent
   presses within a session land under budget. Candidate fixes (out of scope
   here): swap eframe wgpu→glow, or daemon-owned pre-warmed hidden picker.
+
+### Step 6.5 — Cold-start latency ✅
+- Swapped eframe render backend `wgpu` → `glow`. Glow uses GL 3.0 directly and
+  skips wgpu's adapter-enumeration cost.
+- Added cold-start instrumentation: `picker::run` captures an `Instant` at
+  entry and the first `App::update` call logs
+  `picker cold-start to first frame: Xms` at `info` level.
+- Build / clippy / 59 tests / release all clean post-swap.
+- **Live measurement** is the user-side gate: with `clipd --daemon` running,
+  press the bound hotkey (Win+Alt+C by default) and read the logged number
+  from the daemon stderr (debug build) or `RUST_LOG=info clipd.exe pick`
+  from a terminal (release).
+- **Residual:** the literal `<100ms` target is **not guaranteed** by this
+  step alone — process spawn + arg parse + config load happen before the
+  measured window. The bigger lever (daemon-spawned hidden-picker + IPC
+  re-show) is **deferred to Step 11** where it lives naturally next to
+  autostart-at-boot.
 
 ### Step 7 — Format preservation on promote
 - Capture all clipboard formats at copy time, store in `formats` JSON column.
@@ -228,6 +245,14 @@ Acceptance criteria are testable.
 - `tray-icon` on the daemon — quit, open config, pause/resume capture.
 - `clipd install --autostart` writes `HKCU\...\Run\clipd` registry key.
 - **Accept:** reboot → daemon starts → tray icon visible → hotkey works.
+- **Sub-task carried from Step 6.5 (cold-start <100ms):** once the daemon
+  autostarts at boot, spawn `clipd pick --prewarm` once at daemon startup;
+  the picker boots eframe, paints once, then hides. Add `Request::Show` to
+  the IPC; WM_HOTKEY sends `Show` instead of spawning a new process. Picker
+  hides instead of exits on Esc/Enter. Daemon supervises and respawns the
+  picker on crash. This shape was deliberately deferred from Step 6.5 to
+  avoid bloating the daemon process — autostart reframes "daemon at boot"
+  as the norm anyway.
 
 ### Step 12 — Config + retention
 - `config.toml` at `%APPDATA%\clipd\config.toml`: hotkey, retention days,

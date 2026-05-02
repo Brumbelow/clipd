@@ -140,7 +140,10 @@ fn cli_search(cfg: &config::Config, query: &str, limit: usize) -> Result<()> {
 }
 
 fn cli_delete(cfg: &config::Config, id: i64) -> Result<()> {
-    expect_ok(daemon::ipc::client::send(cfg, daemon::ipc::Request::Delete { id })?)?;
+    expect_ok(daemon::ipc::client::send(
+        cfg,
+        daemon::ipc::Request::Delete { id },
+    )?)?;
     println!("deleted #{id}");
     Ok(())
 }
