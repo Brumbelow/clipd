@@ -6,6 +6,7 @@
 //! **Logging contract (AGENTS rule 8/123):** metadata only. Never log
 //! preview text, content bytes, hashes, or other content-derived values.
 
+use crate::daemon::clipboard_format;
 use crate::daemon::win_hook::ForegroundInfo;
 use crate::daemon::DaemonState;
 use crate::secrets::{self, Reason, Verdict};
@@ -72,7 +73,20 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
     let bytes = text.as_bytes();
     let hash = blake3::hash(bytes);
 
-    tracing::info!(kind = "text", size_bytes, "clipboard update");
+    // Step 7: enumerate every clipboard format the source app put down,
+    // filtered by the allow-list and size caps. The `_clip` RAII guard
+    // above keeps the clipboard open across this call, which EnumFormats
+    // requires.
+    let captured_formats = clipboard_format::enumerate_formats();
+    let total_format_bytes: usize = captured_formats.iter().map(|f| f.bytes.len()).sum();
+
+    tracing::info!(
+        kind = "text",
+        size_bytes,
+        format_count = captured_formats.len(),
+        format_bytes = total_format_bytes,
+        "clipboard update"
+    );
 
     let now_ms = chrono::Utc::now().timestamp_millis();
     let outcome = store::insert_or_bump(
@@ -86,6 +100,7 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
             created_at: now_ms,
             preview: store::derive_preview(&text),
             source_app: None,
+            formats: &captured_formats,
         },
     )?;
 

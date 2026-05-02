@@ -9,6 +9,7 @@
 //! No graceful shutdown: the daemon exits via `WM_QUIT` on the main thread
 //! and the OS reaps the listener / connection threads.
 
+use crate::daemon::clipboard_format::FormatPayload;
 use crate::daemon::ipc::{to_summary, Request, Response};
 use crate::daemon::{clipboard, DaemonState};
 use crate::store;
@@ -109,7 +110,7 @@ fn dispatch(req: Request, state: &DaemonState) -> Response {
             Err(e) => Response::Error(format!("{e:#}")),
         },
         Request::Promote { id } => match store::get_decrypted(&db, vault, id) {
-            Ok(Some((row, plaintext))) => promote(row.kind.as_str(), &plaintext),
+            Ok(Some(d)) => promote(d.row.kind.as_str(), &d.plaintext, &d.formats),
             Ok(None) => Response::Error(format!("entry #{id} not found")),
             Err(e) => Response::Error(format!("{e:#}")),
         },
@@ -124,9 +125,20 @@ fn dispatch(req: Request, state: &DaemonState) -> Response {
     }
 }
 
-fn promote(kind: &str, plaintext: &[u8]) -> Response {
+fn promote(kind: &str, plaintext: &[u8], formats: &[FormatPayload]) -> Response {
+    // Step 7: row carries the full format set captured at copy time.
+    // Replay them all so the receiver picks the highest-fidelity payload
+    // it understands.
+    if !formats.is_empty() {
+        return match clipboard::set_all_formats(formats) {
+            Ok(()) => Response::Ok,
+            Err(e) => Response::Error(format!("{e:#}")),
+        };
+    }
+    // Fallback: pre-Step-7 row with no captured formats. Text-only
+    // restore via CF_UNICODETEXT.
     if kind != "text" {
-        return Response::Error(format!("non-text promote (kind={kind}) requires Step 7"));
+        return Response::Error(format!("entry kind={kind} has no captured formats"));
     }
     match std::str::from_utf8(plaintext) {
         Err(_) => Response::Error("text entry has invalid UTF-8".into()),
@@ -190,6 +202,7 @@ mod tests {
                 created_at: t,
                 preview: store::derive_preview(text),
                 source_app: None,
+                formats: &[],
             },
         )
         .unwrap();
@@ -305,6 +318,50 @@ mod tests {
         let resp = client::send_to(&f.pipe, Request::Promote { id: 12345 }).unwrap();
         assert!(matches!(resp, Response::Error(ref m) if m.contains("not found")));
     }
+
+    #[test]
+    fn promote_non_text_with_no_formats_returns_error() {
+        // Step 7 replaced the "non-text promote requires Step 7" placeholder
+        // with a real check: a row with no captured formats and a non-text
+        // kind has nothing to restore. Verify the new error text.
+        let f = fixture();
+        let h = blake3::hash(b"image-bytes");
+        let outcome = store::insert_or_bump(
+            &f.state.cfg.db_full_path(),
+            &f.state.vault,
+            &NewEntry {
+                kind: "image",
+                content: b"image-bytes",
+                hash: h.as_bytes(),
+                size_bytes: 11,
+                created_at: 1000,
+                preview: "image-bytes".into(),
+                source_app: None,
+                formats: &[],
+            },
+        )
+        .unwrap();
+        let id = match outcome {
+            store::Outcome::Inserted { id } => id,
+            _ => panic!("expected Inserted"),
+        };
+
+        let resp = client::send_to(&f.pipe, Request::Promote { id }).unwrap();
+        match resp {
+            Response::Error(m) => {
+                assert!(
+                    m.contains("kind=image") && m.contains("no captured formats"),
+                    "unexpected error message: {m}"
+                );
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    // Note: success paths for Promote (text fallback, multi-format) are
+    // intentionally not unit-tested — they touch the real Windows clipboard,
+    // which races with other processes during CI. Live verification covers
+    // the round-trip per Step 7's accept criterion.
 
     #[test]
     fn bad_json_keeps_listener_alive() {

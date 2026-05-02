@@ -215,9 +215,25 @@ Acceptance criteria are testable.
   re-show) is **deferred to Step 11** where it lives naturally next to
   autostart-at-boot.
 
-### Step 7 — Format preservation on promote
-- Capture all clipboard formats at copy time, store in `formats` JSON column.
-- Restore all formats on promote (loop `SetClipboardData`).
+### Step 7 — Format preservation on promote ✅
+- Capture all clipboard formats at copy time. Implemented as schema v3
+  with a per-row child table `entry_formats` (encrypted ciphertext + nonce
+  per format), not the JSON column originally sketched — the child table
+  keeps AES-GCM nonce-uniqueness trivially correct, eliminates base64/JSON
+  inflation, and lets future format-aware queries index by name.
+- Restore all formats on promote (loop `SetClipboardData::set_without_clear`
+  per format; standard CF_* codes resolve via a static table, registered
+  names re-resolve to the session-local code via `RegisterClipboardFormatW`).
+- Format scope is text + rich-text (allow-list): CF_UNICODETEXT, CF_TEXT,
+  HTML Format, Rich Text Format, Csv, and the Excel OLE bundle
+  (Biff12/Biff8/DataObject/Link Source/Embed Source/Object Descriptor/Native).
+  CF_DIB/CF_BITMAP/CF_DIBV5 deliberately deferred to Step 8 (image);
+  CF_HDROP deferred to a future "kind=files" step.
+- Per-format size cap 4 MiB; total cap 16 MiB. Drops surface as `info!`
+  with format name + size so "paste into Excel didn't preserve formatting"
+  reports are diagnosable.
+- Pre-Step-7 rows fall back to the existing `set_text` path (empty
+  `entry_formats` set is the marker).
 - **Accept:** copy a styled cell from Excel, promote later → paste into Excel
   preserves formatting; paste into Notepad gets the plain text fallback.
 

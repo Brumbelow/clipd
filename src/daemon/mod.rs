@@ -1,12 +1,15 @@
 //! Daemon: long-lived process owning the clipboard hook, hotkey, and store.
 //!
 //! Composition:
-//!   - `win_hook`  — Win32 message-only window, listener, hotkey, message pump.
-//!   - `capture`   — clipboard payload read + store insert.
-//!   - `ipc`       — named-pipe server (stub until Step 5).
+//!   - `win_hook`         — Win32 message-only window, listener, hotkey, message pump.
+//!   - `capture`          — clipboard payload read + store insert.
+//!   - `clipboard`        — clipboard write path (Step 5 text, Step 7 multi-format).
+//!   - `clipboard_format` — Step 7: format enumeration + name/code helpers.
+//!   - `ipc`              — named-pipe server.
 
 pub mod capture;
 pub mod clipboard;
+pub mod clipboard_format;
 pub mod ipc;
 pub mod win_hook;
 
