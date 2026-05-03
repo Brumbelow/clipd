@@ -100,6 +100,14 @@ pub fn name_for_code(code: u32) -> Option<String> {
     raw::format_name_big(code)
 }
 
+/// `clipd:`-prefixed `entry_formats` names are clipd-internal derived data
+/// (Step 8 PNG thumbnails / full-size encodes; future OCR text, etc.) — not
+/// Win32 clipboard formats. Promote loops must skip these so we don't
+/// register garbage format names with the OS clipboard.
+pub fn is_clipd_internal(name: &str) -> bool {
+    name.starts_with("clipd:")
+}
+
 /// Enumerate every clipboard format the source app made available, filtered
 /// through [`is_allowed`] and the per-format / total size caps.
 ///
@@ -226,6 +234,18 @@ mod tests {
         assert_eq!(standard_code("Rich Text Format"), None);
         assert_eq!(standard_code("Biff12"), None);
         assert_eq!(standard_code(""), None);
+    }
+
+    #[test]
+    fn clipd_internal_prefix_matches_only_clipd_names() {
+        assert!(is_clipd_internal("clipd:png_thumb"));
+        assert!(is_clipd_internal("clipd:png_full"));
+        assert!(is_clipd_internal("clipd:"));
+        // Real Win32 names must NOT match the prefix.
+        assert!(!is_clipd_internal("CF_UNICODETEXT"));
+        assert!(!is_clipd_internal("HTML Format"));
+        assert!(!is_clipd_internal("Biff12"));
+        assert!(!is_clipd_internal(""));
     }
 
     #[test]

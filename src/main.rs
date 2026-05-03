@@ -167,6 +167,9 @@ fn expect_ok(resp: daemon::ipc::Response) -> Result<()> {
         daemon::ipc::Response::Ok | daemon::ipc::Response::Pong => Ok(()),
         daemon::ipc::Response::Error(msg) => anyhow::bail!("{msg}"),
         daemon::ipc::Response::Entries(_) => anyhow::bail!("unexpected Entries response"),
+        daemon::ipc::Response::Thumbnail { .. } => {
+            anyhow::bail!("unexpected Thumbnail response")
+        }
     }
 }
 
@@ -221,6 +224,7 @@ fn print_entries(resp: daemon::ipc::Response) {
         }
         Response::Ok => println!("ok"),
         Response::Pong => println!("pong"),
+        Response::Thumbnail { png_b64 } => println!("thumbnail ({} bytes b64)", png_b64.len()),
         Response::Error(msg) => eprintln!("error: {msg}"),
     }
 }

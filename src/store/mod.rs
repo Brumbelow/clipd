@@ -320,6 +320,35 @@ pub fn delete(db_path: &Path, vault: &Vault, id: i64) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// Step 8: fetch and decrypt the `clipd:png_thumb` payload for an entry,
+/// if any. Returns `Ok(None)` for entries that have no thumbnail (text
+/// rows, images whose DIB couldn't be decoded for thumbnail generation).
+pub fn get_thumbnail(db_path: &Path, vault: &Vault, id: i64) -> Result<Option<Vec<u8>>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let conn = open_ro(db_path)?;
+    let row = conn
+        .query_row(
+            "SELECT ciphertext, nonce
+             FROM entry_formats
+             WHERE entry_id = ?1 AND name = 'clipd:png_thumb'",
+            params![id],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )
+        .optional()
+        .context("get_thumbnail query")?;
+    match row {
+        None => Ok(None),
+        Some((ciphertext, nonce)) => {
+            let png = vault
+                .decrypt(&nonce, &ciphertext)
+                .context("decrypting thumbnail")?;
+            Ok(Some(png))
+        }
+    }
+}
+
 /// Set or clear the `pinned` flag. Returns `true` if a row matched.
 pub fn set_pinned(db_path: &Path, vault: &Vault, id: i64, pinned: bool) -> Result<bool> {
     let conn = open_or_init(db_path, vault)?;
@@ -918,5 +947,98 @@ mod tests {
             .unwrap();
         assert_eq!(entries, 1);
         assert_eq!(formats_n, 1);
+    }
+
+    // ---- Step 8 thumbnail tests ----
+
+    #[test]
+    fn get_thumbnail_returns_decrypted_bytes() {
+        let f = fixture();
+        let dib = b"fake-dib-bytes";
+        let h = blake3::hash(dib);
+        let png = b"\x89PNG\r\n\x1a\nthumb-bytes".to_vec();
+        let formats = [fmt("clipd:png_thumb", &png)];
+        insert_or_bump(
+            &f.db,
+            &f.vault,
+            &NewEntry {
+                kind: "image",
+                content: dib,
+                hash: h.as_bytes(),
+                size_bytes: dib.len(),
+                created_at: 1000,
+                preview: "image (1x1)".into(),
+                source_app: None,
+                formats: &formats,
+            },
+        )
+        .unwrap();
+
+        let id: i64 = Connection::open(&f.db)
+            .unwrap()
+            .query_row("SELECT id FROM entries LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        let recovered = get_thumbnail(&f.db, &f.vault, id)
+            .unwrap()
+            .expect("thumb should be present");
+        assert_eq!(recovered, png);
+    }
+
+    #[test]
+    fn get_thumbnail_returns_none_for_text_row() {
+        let f = fixture();
+        let h = blake3::hash(b"plain text");
+        insert_or_bump(&f.db, &f.vault, &new_text("plain text", h.as_bytes(), 1000)).unwrap();
+
+        let id: i64 = Connection::open(&f.db)
+            .unwrap()
+            .query_row("SELECT id FROM entries LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        let result = get_thumbnail(&f.db, &f.vault, id).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_thumbnail_returns_none_for_unknown_id() {
+        let f = fixture();
+        // Create the DB so the path exists.
+        let _ = open_or_init(&f.db, &f.vault).unwrap();
+
+        let result = get_thumbnail(&f.db, &f.vault, 999_999).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_thumbnail_skips_other_clipd_internal_rows() {
+        // An image row with `clipd:png_full` but no `clipd:png_thumb`
+        // should return None — get_thumbnail filters strictly by name.
+        let f = fixture();
+        let dib = b"another-fake-dib";
+        let h = blake3::hash(dib);
+        let formats = [fmt("clipd:png_full", b"big png blob")];
+        insert_or_bump(
+            &f.db,
+            &f.vault,
+            &NewEntry {
+                kind: "image",
+                content: dib,
+                hash: h.as_bytes(),
+                size_bytes: dib.len(),
+                created_at: 1000,
+                preview: "image (2x2)".into(),
+                source_app: None,
+                formats: &formats,
+            },
+        )
+        .unwrap();
+
+        let id: i64 = Connection::open(&f.db)
+            .unwrap()
+            .query_row("SELECT id FROM entries LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+
+        assert!(get_thumbnail(&f.db, &f.vault, id).unwrap().is_none());
     }
 }

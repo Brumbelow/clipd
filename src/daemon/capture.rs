@@ -1,12 +1,16 @@
-//! Clipboard capture: read CF_UNICODETEXT, classify, hash, persist (or bump dedup).
+//! Clipboard capture: read CF_UNICODETEXT (Step 2/7) or CF_DIB (Step 8),
+//! classify, hash, persist (or bump dedup).
 //!
-//! Step 2 only handles plain text. Non-text formats (CF_DIB, CF_HDROP,
-//! CF_HTML, RTF) are logged as unsupported until Step 7/8.
+//! Step 7 captures every text + rich-text format the source app put down
+//! into a per-row child table; Step 8 adds an image branch that fires when
+//! no CF_UNICODETEXT is present but CF_DIB is.
 //!
 //! **Logging contract (AGENTS rule 8/123):** metadata only. Never log
 //! preview text, content bytes, hashes, or other content-derived values.
 
 use crate::daemon::clipboard_format;
+use crate::daemon::clipboard_format::FormatPayload;
+use crate::daemon::image as clipd_image;
 use crate::daemon::win_hook::ForegroundInfo;
 use crate::daemon::DaemonState;
 use crate::secrets::{self, Reason, Verdict};
@@ -45,10 +49,14 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
     let text: String = match get(formats::Unicode) {
         Ok(s) => s,
         Err(e) => {
-            // Common: clipboard held by another app, or non-text format only.
-            // Do NOT log the payload — only the error code.
-            tracing::info!(kind = "unsupported", "clipboard update");
-            tracing::debug!(error = %e, "get_clipboard(Unicode) miss");
+            // No text — Step 8 image branch. The pre-text gates above have
+            // already fired and apply equally to image events (exclude
+            // flag, history flag, browser-extension popup).
+            tracing::debug!(error = %e, "get_clipboard(Unicode) miss; trying image");
+            if let Err(img_err) = try_capture_image(state) {
+                tracing::info!(kind = "unsupported", "clipboard update");
+                tracing::debug!(error = %img_err, "image capture failed");
+            }
             return Ok(());
         }
     };
@@ -101,6 +109,100 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
             preview: store::derive_preview(&text),
             source_app: None,
             formats: &captured_formats,
+        },
+    )?;
+
+    match outcome {
+        store::Outcome::Inserted { id } => tracing::info!(id, "stored"),
+        store::Outcome::BumpedLastSeen { id } => {
+            tracing::debug!(id, "deduped, bumped last_seen")
+        }
+    }
+    Ok(())
+}
+
+/// Step 8: read CF_DIB off the clipboard (assumes [`Clipboard`] is already
+/// open via the caller's RAII guard), encode a thumbnail + full PNG via
+/// the `image` module, and persist with `kind="image"`.
+///
+/// Returns `Ok(())` on a successful insert OR a clean "no CF_DIB present"
+/// — the latter is the common case for non-image, non-text clipboard
+/// events (e.g. CF_HDROP-only file drag) and isn't surfaced as an error.
+fn try_capture_image(state: &DaemonState) -> Result<()> {
+    if !raw::is_format_avail(formats::CF_DIB) {
+        return Ok(());
+    }
+
+    let mut dib = Vec::new();
+    if let Err(e) = raw::get_vec(formats::CF_DIB, &mut dib) {
+        anyhow::bail!("get_vec(CF_DIB): {e}");
+    }
+    let size_bytes = dib.len();
+    if size_bytes == 0 {
+        return Ok(());
+    }
+    if size_bytes > clipd_image::IMAGE_DIB_CAP_BYTES {
+        tracing::info!(
+            size_bytes,
+            cap = clipd_image::IMAGE_DIB_CAP_BYTES,
+            "image dropped: exceeds size cap"
+        );
+        return Ok(());
+    }
+
+    // Preview string + thumbnail/full PNG. Both are best-effort: an
+    // unsupported DIB layout (e.g., paletted) still stores the canonical
+    // bytes and round-trips on promote, but the picker shows a placeholder
+    // because we can't decode for thumbnail.
+    let meta = clipd_image::parse_dib_meta(&dib);
+    let preview = match meta {
+        Some(m) => format!("image ({}x{})", m.width, m.height),
+        None => "image (unsupported format)".to_string(),
+    };
+
+    let derived: Vec<FormatPayload> = match clipd_image::dib_to_rgba(&dib) {
+        Some(rgba) => {
+            let thumb = clipd_image::thumbnail(&rgba, clipd_image::THUMB_MAX_DIM);
+            let thumb_png = clipd_image::rgba_to_png(&thumb)?;
+            let full_png = clipd_image::rgba_to_png(&rgba)?;
+            vec![
+                FormatPayload {
+                    name: "clipd:png_thumb".into(),
+                    bytes: thumb_png,
+                },
+                FormatPayload {
+                    name: "clipd:png_full".into(),
+                    bytes: full_png,
+                },
+            ]
+        }
+        None => Vec::new(),
+    };
+    let derived_bytes: usize = derived.iter().map(|f| f.bytes.len()).sum();
+
+    let hash = blake3::hash(&dib);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    tracing::info!(
+        kind = "image",
+        size_bytes,
+        format_count = derived.len(),
+        format_bytes = derived_bytes,
+        "clipboard update"
+    );
+
+    let outcome = store::insert_or_bump(
+        &state.cfg.db_full_path(),
+        &state.vault,
+        &store::NewEntry {
+            kind: "image",
+            content: &dib,
+            hash: hash.as_bytes(),
+            size_bytes,
+            created_at: now_ms,
+            preview: store::derive_preview(&preview),
+            source_app: None,
+            formats: &derived,
         },
     )?;
 

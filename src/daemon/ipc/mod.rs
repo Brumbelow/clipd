@@ -12,11 +12,27 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
-    List { limit: usize },
-    Search { query: String, limit: usize },
-    Delete { id: i64 },
-    Pin { id: i64, pinned: bool },
-    Promote { id: i64 },
+    List {
+        limit: usize,
+    },
+    Search {
+        query: String,
+        limit: usize,
+    },
+    Delete {
+        id: i64,
+    },
+    Pin {
+        id: i64,
+        pinned: bool,
+    },
+    Promote {
+        id: i64,
+    },
+    /// Step 8: picker fetches a PNG thumbnail for an image-kind row.
+    GetThumbnail {
+        id: i64,
+    },
     Pause,
     Resume,
     Ping,
@@ -27,6 +43,11 @@ pub enum Response {
     Entries(Vec<EntrySummary>),
     Ok,
     Pong,
+    /// Step 8: PNG thumbnail bytes, base64-encoded so they fit the
+    /// JSON-line protocol without a binary side channel.
+    Thumbnail {
+        png_b64: String,
+    },
     Error(String),
 }
 

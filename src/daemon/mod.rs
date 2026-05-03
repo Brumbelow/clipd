@@ -3,13 +3,16 @@
 //! Composition:
 //!   - `win_hook`         — Win32 message-only window, listener, hotkey, message pump.
 //!   - `capture`          — clipboard payload read + store insert.
-//!   - `clipboard`        — clipboard write path (Step 5 text, Step 7 multi-format).
+//!   - `clipboard`        — clipboard write path (Step 5 text, Step 7 multi-format,
+//!     Step 8 image).
 //!   - `clipboard_format` — Step 7: format enumeration + name/code helpers.
+//!   - `image`            — Step 8: DIB↔PNG conversion + thumbnail resize.
 //!   - `ipc`              — named-pipe server.
 
 pub mod capture;
 pub mod clipboard;
 pub mod clipboard_format;
+pub mod image;
 pub mod ipc;
 pub mod win_hook;
 

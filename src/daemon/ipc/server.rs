@@ -14,6 +14,7 @@ use crate::daemon::ipc::{to_summary, Request, Response};
 use crate::daemon::{clipboard, DaemonState};
 use crate::store;
 use anyhow::{Context, Result};
+use base64::Engine;
 use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions, Stream};
 use std::io::{BufRead, BufReader, Write};
 use tracing::{debug, info, warn};
@@ -110,8 +111,21 @@ fn dispatch(req: Request, state: &DaemonState) -> Response {
             Err(e) => Response::Error(format!("{e:#}")),
         },
         Request::Promote { id } => match store::get_decrypted(&db, vault, id) {
-            Ok(Some(d)) => promote(d.row.kind.as_str(), &d.plaintext, &d.formats),
+            Ok(Some(d)) => {
+                if d.row.kind == "image" {
+                    promote_image(&d.plaintext)
+                } else {
+                    promote(d.row.kind.as_str(), &d.plaintext, &d.formats)
+                }
+            }
             Ok(None) => Response::Error(format!("entry #{id} not found")),
+            Err(e) => Response::Error(format!("{e:#}")),
+        },
+        Request::GetThumbnail { id } => match store::get_thumbnail(&db, vault, id) {
+            Ok(Some(png)) => Response::Thumbnail {
+                png_b64: base64::engine::general_purpose::STANDARD.encode(&png),
+            },
+            Ok(None) => Response::Error(format!("entry #{id} has no thumbnail")),
             Err(e) => Response::Error(format!("{e:#}")),
         },
         Request::Pause => {
@@ -122,6 +136,16 @@ fn dispatch(req: Request, state: &DaemonState) -> Response {
             state.set_paused(false);
             Response::Ok
         }
+    }
+}
+
+/// Step 8: image promote. The canonical CF_DIB lives in `entries.content`;
+/// the picker has already shown the user a thumbnail, so this just hands
+/// the original bytes back to the OS clipboard.
+fn promote_image(dib: &[u8]) -> Response {
+    match clipboard::set_image(dib) {
+        Ok(()) => Response::Ok,
+        Err(e) => Response::Error(format!("{e:#}")),
     }
 }
 
@@ -320,22 +344,23 @@ mod tests {
     }
 
     #[test]
-    fn promote_non_text_with_no_formats_returns_error() {
-        // Step 7 replaced the "non-text promote requires Step 7" placeholder
-        // with a real check: a row with no captured formats and a non-text
-        // kind has nothing to restore. Verify the new error text.
+    fn promote_non_text_non_image_with_no_formats_returns_error() {
+        // Step 7 replaced the placeholder error with a real check: a row
+        // with no captured formats and a non-text, non-image kind has
+        // nothing to restore. Use kind="files" so the dispatch doesn't
+        // route to the image path (which would touch the real clipboard).
         let f = fixture();
-        let h = blake3::hash(b"image-bytes");
+        let h = blake3::hash(b"unknown-bytes");
         let outcome = store::insert_or_bump(
             &f.state.cfg.db_full_path(),
             &f.state.vault,
             &NewEntry {
-                kind: "image",
-                content: b"image-bytes",
+                kind: "files",
+                content: b"unknown-bytes",
                 hash: h.as_bytes(),
-                size_bytes: 11,
+                size_bytes: 13,
                 created_at: 1000,
-                preview: "image-bytes".into(),
+                preview: "unknown-bytes".into(),
                 source_app: None,
                 formats: &[],
             },
@@ -350,7 +375,7 @@ mod tests {
         match resp {
             Response::Error(m) => {
                 assert!(
-                    m.contains("kind=image") && m.contains("no captured formats"),
+                    m.contains("kind=files") && m.contains("no captured formats"),
                     "unexpected error message: {m}"
                 );
             }
@@ -358,10 +383,78 @@ mod tests {
         }
     }
 
-    // Note: success paths for Promote (text fallback, multi-format) are
-    // intentionally not unit-tested — they touch the real Windows clipboard,
-    // which races with other processes during CI. Live verification covers
-    // the round-trip per Step 7's accept criterion.
+    #[test]
+    fn get_thumbnail_unknown_id_returns_error() {
+        let f = fixture();
+        let resp = client::send_to(&f.pipe, Request::GetThumbnail { id: 99999 }).unwrap();
+        match resp {
+            Response::Error(m) => assert!(m.contains("no thumbnail")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_thumbnail_text_row_returns_error() {
+        let f = fixture();
+        let id = insert_text(&f.state, "no thumb here", 1000);
+        let resp = client::send_to(&f.pipe, Request::GetThumbnail { id }).unwrap();
+        match resp {
+            Response::Error(m) => assert!(m.contains("no thumbnail")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_thumbnail_returns_base64_png_for_image_row() {
+        // Insert an image-kind row with a fake `clipd:png_thumb` format
+        // payload. We don't actually decode the "PNG" — the IPC layer
+        // just base64-encodes whatever bytes are stored, and the test
+        // verifies the round-trip.
+        use crate::daemon::clipboard_format::FormatPayload;
+
+        let f = fixture();
+        let h = blake3::hash(b"fake-dib");
+        let png_bytes = b"\x89PNG\r\n\x1a\n--fake--".to_vec();
+        let outcome = store::insert_or_bump(
+            &f.state.cfg.db_full_path(),
+            &f.state.vault,
+            &NewEntry {
+                kind: "image",
+                content: b"fake-dib",
+                hash: h.as_bytes(),
+                size_bytes: 8,
+                created_at: 1000,
+                preview: "image (1x1)".into(),
+                source_app: None,
+                formats: &[FormatPayload {
+                    name: "clipd:png_thumb".into(),
+                    bytes: png_bytes.clone(),
+                }],
+            },
+        )
+        .unwrap();
+        let id = match outcome {
+            store::Outcome::Inserted { id } => id,
+            _ => panic!("expected Inserted"),
+        };
+
+        let resp = client::send_to(&f.pipe, Request::GetThumbnail { id }).unwrap();
+        match resp {
+            Response::Thumbnail { png_b64 } => {
+                use base64::Engine;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&png_b64)
+                    .unwrap();
+                assert_eq!(decoded, png_bytes);
+            }
+            other => panic!("expected Thumbnail, got {other:?}"),
+        }
+    }
+
+    // Note: success paths for Promote (text fallback, multi-format,
+    // image) are intentionally not unit-tested — they touch the real
+    // Windows clipboard, which races with other processes during CI.
+    // Live verification covers the round-trip per Step 7/8 criteria.
 
     #[test]
     fn bad_json_keeps_listener_alive() {

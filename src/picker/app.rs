@@ -7,13 +7,31 @@
 //!   Ctrl+P       — toggle pin on selected entry
 //!   Delete       — remove selected entry
 //!   Esc          — close without action
+//!
+//! Step 8: image-kind rows render at 80px with a 64×64 thumbnail fetched
+//! lazily from the daemon (`Request::GetThumbnail`). Thumbnails are
+//! decoded once via the `image` crate and uploaded to the GPU as an
+//! `egui::TextureHandle` cached by entry id for the picker process
+//! lifetime.
 
 use crate::config::Config;
 use crate::daemon::ipc::{self, EntrySummary, Request, Response};
+use base64::Engine;
 use eframe::App;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
+
+/// State of an image row's thumbnail in the picker cache.
+enum ThumbState {
+    /// GetThumbnail succeeded and the texture is uploaded.
+    Ready(egui::TextureHandle),
+    /// GetThumbnail returned an error (no thumb stored, decode failed,
+    /// daemon down, etc.) — render a placeholder and don't retry every
+    /// frame.
+    Failed,
+}
 
 pub struct PickerApp {
     cfg: Arc<Config>,
@@ -27,6 +45,11 @@ pub struct PickerApp {
     focused_once: bool,
     started_at: Instant,
     first_frame_logged: bool,
+    /// Step 8: lazy cache of image thumbnails keyed by entry id. Filled
+    /// on first render of each visible image row; entries persist for
+    /// the picker process lifetime (process is short-lived — exits on
+    /// Esc/Enter).
+    thumb_cache: HashMap<i64, ThumbState>,
 }
 
 impl PickerApp {
@@ -43,9 +66,53 @@ impl PickerApp {
             focused_once: false,
             started_at,
             first_frame_logged: false,
+            thumb_cache: HashMap::new(),
         };
         s.refresh();
         s
+    }
+
+    /// Fetch + decode + upload an image-row thumbnail. Called lazily on
+    /// the first frame each image row appears. Synchronous IPC + decode
+    /// on the UI thread is fine for the typical ≤5 visible image rows;
+    /// each fetch is ~5–15ms (IPC roundtrip dominates).
+    fn ensure_thumb(&mut self, ctx: &egui::Context, id: i64) {
+        if self.thumb_cache.contains_key(&id) {
+            return;
+        }
+        let png_bytes = match ipc::client::send(&self.cfg, Request::GetThumbnail { id }) {
+            Ok(Response::Thumbnail { png_b64 }) => {
+                match base64::engine::general_purpose::STANDARD.decode(&png_b64) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        warn!(id, error = %e, "thumbnail base64 decode failed");
+                        self.thumb_cache.insert(id, ThumbState::Failed);
+                        return;
+                    }
+                }
+            }
+            Ok(Response::Error(_)) | Ok(_) | Err(_) => {
+                self.thumb_cache.insert(id, ThumbState::Failed);
+                return;
+            }
+        };
+
+        let dyn_img = match image::load_from_memory(&png_bytes) {
+            Ok(i) => i.to_rgba8(),
+            Err(e) => {
+                warn!(id, error = %e, "thumbnail PNG decode failed");
+                self.thumb_cache.insert(id, ThumbState::Failed);
+                return;
+            }
+        };
+        let (w, h) = (dyn_img.width() as usize, dyn_img.height() as usize);
+        let color_image = egui::ColorImage::from_rgba_unmultiplied([w, h], dyn_img.as_raw());
+        let handle = ctx.load_texture(
+            format!("thumb-{id}"),
+            color_image,
+            egui::TextureOptions::LINEAR,
+        );
+        self.thumb_cache.insert(id, ThumbState::Ready(handle));
     }
 
     fn refresh(&mut self) {
@@ -176,22 +243,72 @@ impl App for PickerApp {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        for (i, entry) in self.results.iter().enumerate() {
-                            let is_sel = i == self.selected;
+                        // Snapshot the entry ids + kinds so we can mutate
+                        // self.thumb_cache via ensure_thumb() inside the
+                        // render loop without aliasing self.results.
+                        let row_data: Vec<(i64, String, bool, String, bool)> = self
+                            .results
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| {
+                                (
+                                    e.id,
+                                    e.kind.clone(),
+                                    e.pinned,
+                                    e.preview.clone(),
+                                    i == self.selected,
+                                )
+                            })
+                            .collect();
+
+                        for (id, kind, pinned, preview, is_sel) in row_data {
                             let bg = if is_sel {
                                 ui.style().visuals.selection.bg_fill
                             } else {
                                 egui::Color32::TRANSPARENT
                             };
                             egui::Frame::none().fill(bg).show(ui, |ui| {
-                                ui.horizontal(|ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.label(badge(&entry.kind));
-                                    if entry.pinned {
-                                        ui.label("📌");
-                                    }
-                                    ui.label(truncate(&entry.preview, 100));
-                                });
+                                if kind == "image" {
+                                    self.ensure_thumb(ctx, id);
+                                    ui.horizontal(|ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.set_min_height(72.0);
+                                        ui.label(badge(&kind));
+                                        if pinned {
+                                            ui.label("📌");
+                                        }
+                                        match self.thumb_cache.get(&id) {
+                                            Some(ThumbState::Ready(handle)) => {
+                                                ui.add(
+                                                    egui::Image::from_texture(handle)
+                                                        .max_size(egui::vec2(64.0, 64.0))
+                                                        .fit_to_exact_size(egui::vec2(64.0, 64.0)),
+                                                );
+                                            }
+                                            Some(ThumbState::Failed) | None => {
+                                                let (rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(64.0, 64.0),
+                                                    egui::Sense::hover(),
+                                                );
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    2.0,
+                                                    egui::Color32::from_gray(60),
+                                                );
+                                            }
+                                        }
+                                        ui.label(truncate(&preview, 60));
+                                    });
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.label(badge(&kind));
+                                        if pinned {
+                                            ui.label("📌");
+                                        }
+                                        ui.label(truncate(&preview, 100));
+                                    });
+                                }
                             });
                         }
                     });

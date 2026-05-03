@@ -237,9 +237,29 @@ Acceptance criteria are testable.
 - **Accept:** copy a styled cell from Excel, promote later → paste into Excel
   preserves formatting; paste into Notepad gets the plain text fallback.
 
-### Step 8 — Image support
-- PNG-encode CF_DIB on capture (deflate via `image` crate or raw zlib).
-- Picker renders thumbnails (egui `Image::from_bytes`).
+### Step 8 — Image support ✅
+- New capture branch fires when CF_UNICODETEXT is absent and CF_DIB is
+  present. Stores the canonical CF_DIB in `entries.content` (encrypted),
+  derives a 256×256-bound PNG thumbnail and a full-size PNG via the
+  `image` crate, persists both as `clipd:png_thumb` / `clipd:png_full`
+  rows in `entry_formats` (Step 7's child table, reused with a
+  `clipd:`-prefix discriminator).
+- Promote splits by kind: `kind == "image"` calls a new `set_image`
+  that writes CF_DIB + best-effort reconstructs CF_BITMAP for legacy
+  GDI receivers (Paint, older Office) by prepending a 14-byte
+  `BITMAPFILEHEADER` and calling `clipboard_win::raw::set_bitmap`. All
+  other kinds keep the Step 7 multi-format replay path.
+- Picker renders image rows at ~80px height with a 64×64 thumbnail
+  fetched lazily via the new `Request::GetThumbnail { id }` →
+  `Response::Thumbnail { png_b64 }` IPC. Thumbnails are decoded via
+  `image::load_from_memory` and uploaded to the GPU as
+  `egui::TextureHandle`s cached by entry id for the picker process
+  lifetime.
+- New direct deps: `base64 = "0.22"` (genuinely new), `image = "0.25"`
+  with `default-features = false, features = ["png"]` (promoted from a
+  transitive eframe dep).
+- Per-image size cap 64 MiB; thumbnail bounding box 256×256 (Triangle
+  filter via `image::imageops::resize`).
 - **Accept:** Win+PrtScn → picker shows scaled thumbnail; Enter pastes original
   image into Paint.
 
