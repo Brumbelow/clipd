@@ -40,6 +40,10 @@ pub enum DateFilter {
 
 pub struct NewEntry<'a> {
     pub kind: &'a str,
+    /// Step 10: content-shape kind (`url|json|hex|base64|code|text`).
+    /// Pass `"text"` for image/files captures — picker badge logic falls
+    /// back to `kind` when content_kind isn't meaningful.
+    pub content_kind: &'a str,
     pub content: &'a [u8],
     pub hash: &'a [u8],
     pub size_bytes: usize,
@@ -62,6 +66,8 @@ pub struct EntryRow {
     pub created_at: i64,
     pub last_seen: i64,
     pub kind: String,
+    /// Step 10: content-shape kind. See `crate::classify::ContentKind`.
+    pub content_kind: String,
     pub preview: String,
     pub pinned: bool,
     // size_bytes: surfaced for Step 12 (retention purge) and Step 13 (doctor stats).
@@ -139,12 +145,13 @@ pub fn insert_or_bump(db_path: &Path, vault: &Vault, e: &NewEntry) -> Result<Out
     let tx = conn.transaction().context("opening insert transaction")?;
     tx.execute(
         "INSERT INTO entries
-            (created_at, last_seen, kind, content, nonce, preview,
+            (created_at, last_seen, kind, content_kind, content, nonce, preview,
              source_app, pinned, sensitive, hash, size_bytes, formats)
-         VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, 0, 0, ?7, ?8, NULL)",
+         VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?9, NULL)",
         params![
             e.created_at,
             e.kind,
+            e.content_kind,
             ciphertext,
             nonce,
             e.preview,
@@ -189,9 +196,9 @@ pub fn list(db_path: &Path, limit: usize) -> Result<Vec<EntryRow>> {
     let conn = open_ro(db_path)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, created_at, last_seen, kind, preview, pinned, size_bytes
+            "SELECT id, created_at, last_seen, kind, content_kind, preview, pinned, size_bytes
              FROM entries
-             ORDER BY last_seen DESC
+             ORDER BY pinned DESC, last_seen DESC
              LIMIT ?1",
         )
         .context("preparing list statement")?;
@@ -202,9 +209,10 @@ pub fn list(db_path: &Path, limit: usize) -> Result<Vec<EntryRow>> {
                 created_at: r.get(1)?,
                 last_seen: r.get(2)?,
                 kind: r.get(3)?,
-                preview: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                pinned: r.get::<_, i64>(5)? != 0,
-                size_bytes: r.get(6)?,
+                content_kind: r.get(4)?,
+                preview: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                pinned: r.get::<_, i64>(6)? != 0,
+                size_bytes: r.get(7)?,
             })
         })
         .context("executing list query")?;
@@ -233,7 +241,7 @@ pub fn search(
     let conn = open_ro(db_path)?;
 
     let mut sql = String::from(
-        "SELECT id, created_at, last_seen, kind, preview, pinned, size_bytes \
+        "SELECT id, created_at, last_seen, kind, content_kind, preview, pinned, size_bytes \
          FROM entries WHERE 1=1",
     );
     let mut binds: Vec<Value> = Vec::new();
@@ -271,9 +279,10 @@ pub fn search(
                 created_at: r.get(1)?,
                 last_seen: r.get(2)?,
                 kind: r.get(3)?,
-                preview: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                pinned: r.get::<_, i64>(5)? != 0,
-                size_bytes: r.get(6)?,
+                content_kind: r.get(4)?,
+                preview: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                pinned: r.get::<_, i64>(6)? != 0,
+                size_bytes: r.get(7)?,
             })
         })
         .context("executing search query")?;
@@ -294,7 +303,8 @@ pub fn get_decrypted(db_path: &Path, vault: &Vault, id: i64) -> Result<Option<De
     let conn = open_ro(db_path)?;
     let row = conn
         .query_row(
-            "SELECT id, created_at, last_seen, kind, preview, pinned, size_bytes, content, nonce
+            "SELECT id, created_at, last_seen, kind, content_kind, preview, pinned,
+                    size_bytes, content, nonce
              FROM entries WHERE id = ?1",
             params![id],
             |r| {
@@ -303,12 +313,13 @@ pub fn get_decrypted(db_path: &Path, vault: &Vault, id: i64) -> Result<Option<De
                     created_at: r.get(1)?,
                     last_seen: r.get(2)?,
                     kind: r.get(3)?,
-                    preview: r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    pinned: r.get::<_, i64>(5)? != 0,
-                    size_bytes: r.get(6)?,
+                    content_kind: r.get(4)?,
+                    preview: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                    pinned: r.get::<_, i64>(6)? != 0,
+                    size_bytes: r.get(7)?,
                 };
-                let content: Vec<u8> = r.get(7)?;
-                let nonce: Vec<u8> = r.get(8)?;
+                let content: Vec<u8> = r.get(8)?;
+                let nonce: Vec<u8> = r.get(9)?;
                 Ok((entry, content, nonce))
             },
         )
@@ -453,6 +464,7 @@ mod tests {
     fn new_text<'a>(text: &'a str, hash: &'a [u8], t: i64) -> NewEntry<'a> {
         NewEntry {
             kind: "text",
+            content_kind: "text",
             content: text.as_bytes(),
             hash,
             size_bytes: text.len(),
@@ -471,6 +483,7 @@ mod tests {
     ) -> NewEntry<'a> {
         NewEntry {
             kind: "text",
+            content_kind: "text",
             content: text.as_bytes(),
             hash,
             size_bytes: text.len(),
@@ -509,7 +522,7 @@ mod tests {
             .unwrap();
         // Empty DB walks all migrations: v2 sweep is a no-op (no plaintext
         // rows), v3 creates entry_formats, v4 adds idx_created.
-        assert_eq!(v, 4);
+        assert_eq!(v, 5);
     }
 
     #[test]
@@ -695,7 +708,7 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 4, "must walk all the way to v4 in one open_or_init");
+        assert_eq!(v, 5, "must walk all the way to v5 in one open_or_init");
         let (content, nonce): (Vec<u8>, Vec<u8>) = conn
             .query_row("SELECT content, nonce FROM entries LIMIT 1", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -1013,6 +1026,7 @@ mod tests {
             &f.vault,
             &NewEntry {
                 kind: "image",
+                content_kind: "text",
                 content: dib,
                 hash: h.as_bytes(),
                 size_bytes: dib.len(),
@@ -1073,6 +1087,7 @@ mod tests {
             &f.vault,
             &NewEntry {
                 kind: "image",
+                content_kind: "text",
                 content: dib,
                 hash: h.as_bytes(),
                 size_bytes: dib.len(),
@@ -1167,6 +1182,125 @@ mod tests {
 
         let rows = search(&f.db, "", &[DateFilter::After(3000)], 50).unwrap();
         assert_eq!(rows.len(), 2);
+    }
+
+    // ---- Step 10: content_kind + pinned-first list ----
+
+    #[test]
+    fn list_pinned_floats_to_top() {
+        // Step 10's list() now applies `ORDER BY pinned DESC, last_seen DESC`,
+        // so an older pinned row outranks newer unpinned rows even with no
+        // search query (where the picker's fuzzy_rank early-returns without
+        // a pin tiebreaker).
+        let f = fixture();
+        insert_at(&f, "old-pin", 1000);
+        insert_at(&f, "newer", 5000);
+        insert_at(&f, "newest", 9000);
+
+        let id_old: i64 = Connection::open(&f.db)
+            .unwrap()
+            .query_row(
+                "SELECT id FROM entries WHERE preview = ?1",
+                params!["old-pin"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        set_pinned(&f.db, &f.vault, id_old, true).unwrap();
+
+        let rows = list(&f.db, 50).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].preview, "old-pin");
+        assert!(rows[0].pinned);
+    }
+
+    #[test]
+    fn capture_records_content_kind() {
+        let f = fixture();
+        // Insert via NewEntry directly with the content_kind the daemon
+        // would have derived. Verify the column round-trips.
+        let url = "https://example.com/path";
+        let h = blake3::hash(url.as_bytes());
+        insert_or_bump(
+            &f.db,
+            &f.vault,
+            &NewEntry {
+                kind: "text",
+                content_kind: "url",
+                content: url.as_bytes(),
+                hash: h.as_bytes(),
+                size_bytes: url.len(),
+                created_at: 1000,
+                preview: derive_preview(url),
+                source_app: None,
+                formats: &[],
+            },
+        )
+        .unwrap();
+
+        let rows = list(&f.db, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].content_kind, "url");
+    }
+
+    #[test]
+    fn migrate_v3_to_v5_backfills_content_kind() {
+        // Stand up a v3 DB by hand: install v1 DDL, then v3 DDL (entry_formats),
+        // and stamp user_version = 3. Insert a row with NO content_kind column
+        // and an encrypted URL payload (so v2 sweep is a no-op). Re-open via
+        // open_or_init: v4 adds idx_created, v5 adds the column AND backfills
+        // via the classifier.
+        let f = fixture();
+        let url = "https://example.com/foo";
+        let h = blake3::hash(url.as_bytes());
+        {
+            let conn = Connection::open(&f.db).unwrap();
+            conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+            schema::install_v1_for_test(&conn).unwrap();
+            // Encrypt the row content so the v2 sweep is a no-op (it only
+            // touches rows with empty nonce).
+            let (nonce, ciphertext) = f.vault.encrypt(url.as_bytes()).unwrap();
+            conn.execute(
+                "INSERT INTO entries
+                    (created_at, last_seen, kind, content, nonce, preview,
+                     source_app, pinned, sensitive, hash, size_bytes, formats)
+                 VALUES (?1, ?1, 'text', ?2, ?3, ?4, NULL, 0, 0, ?5, ?6, NULL)",
+                params![
+                    1000_i64,
+                    ciphertext,
+                    nonce,
+                    url,
+                    h.as_bytes(),
+                    url.len() as i64,
+                ],
+            )
+            .unwrap();
+            // Run v3 DDL by hand and stamp user_version = 3.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS entry_formats (
+                    entry_id    INTEGER NOT NULL,
+                    name        TEXT    NOT NULL,
+                    ord         INTEGER NOT NULL,
+                    ciphertext  BLOB    NOT NULL,
+                    nonce       BLOB    NOT NULL,
+                    PRIMARY KEY (entry_id, name),
+                    FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+                 );
+                 CREATE INDEX IF NOT EXISTS idx_entry_formats_entry_id
+                    ON entry_formats(entry_id);
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+
+        // Re-open with the production migrator. v4 + v5 both run.
+        let _ = open_or_init(&f.db, &f.vault).unwrap();
+
+        let rows = list(&f.db, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].content_kind, "url",
+            "v5 backfill must classify the URL row from its decrypted content"
+        );
     }
 
     #[test]

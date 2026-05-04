@@ -60,16 +60,27 @@ pub enum Response {
 pub struct EntrySummary {
     pub id: i64,
     pub kind: String,
+    /// Step 10: content-shape kind (`url|json|hex|base64|code|text`).
+    /// `#[serde(default)]` keeps wire-compat with pre-Step-10 callers
+    /// during in-place upgrades — daemon and picker ship as one binary
+    /// today, but the default doesn't cost anything.
+    #[serde(default = "default_content_kind")]
+    pub content_kind: String,
     pub preview: String,
     pub created_at: i64,
     pub last_seen: i64,
     pub pinned: bool,
 }
 
+fn default_content_kind() -> String {
+    "text".to_string()
+}
+
 pub(crate) fn to_summary(row: &EntryRow) -> EntrySummary {
     EntrySummary {
         id: row.id,
         kind: row.kind.clone(),
+        content_kind: row.content_kind.clone(),
         preview: row.preview.clone(),
         created_at: row.created_at,
         last_seen: row.last_seen,

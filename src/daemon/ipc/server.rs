@@ -224,6 +224,7 @@ mod tests {
             &state.vault,
             &NewEntry {
                 kind: "text",
+                content_kind: "text",
                 content: text.as_bytes(),
                 hash: h.as_bytes(),
                 size_bytes: text.len(),
@@ -405,6 +406,7 @@ mod tests {
             &f.state.vault,
             &NewEntry {
                 kind: "files",
+                content_kind: "text",
                 content: b"unknown-bytes",
                 hash: h.as_bytes(),
                 size_bytes: 13,
@@ -469,6 +471,7 @@ mod tests {
             &f.state.vault,
             &NewEntry {
                 kind: "image",
+                content_kind: "text",
                 content: b"fake-dib",
                 hash: h.as_bytes(),
                 size_bytes: 8,

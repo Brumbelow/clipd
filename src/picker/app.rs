@@ -256,7 +256,7 @@ impl App for PickerApp {
                         // Snapshot the entry ids + kinds so we can mutate
                         // self.thumb_cache via ensure_thumb() inside the
                         // render loop without aliasing self.results.
-                        let row_data: Vec<(i64, String, bool, String, bool)> = self
+                        let row_data: Vec<(i64, String, String, bool, String, bool)> = self
                             .results
                             .iter()
                             .enumerate()
@@ -264,6 +264,7 @@ impl App for PickerApp {
                                 (
                                     e.id,
                                     e.kind.clone(),
+                                    e.content_kind.clone(),
                                     e.pinned,
                                     e.preview.clone(),
                                     i == self.selected,
@@ -271,7 +272,7 @@ impl App for PickerApp {
                             })
                             .collect();
 
-                        for (id, kind, pinned, preview, is_sel) in row_data {
+                        for (id, kind, content_kind, pinned, preview, is_sel) in row_data {
                             let bg = if is_sel {
                                 ui.style().visuals.selection.bg_fill
                             } else {
@@ -283,7 +284,7 @@ impl App for PickerApp {
                                     ui.horizontal(|ui| {
                                         ui.set_width(ui.available_width());
                                         ui.set_min_height(72.0);
-                                        ui.label(badge(&kind));
+                                        ui.label(badge(&kind, &content_kind));
                                         if pinned {
                                             ui.label("📌");
                                         }
@@ -312,7 +313,7 @@ impl App for PickerApp {
                                 } else {
                                     ui.horizontal(|ui| {
                                         ui.set_width(ui.available_width());
-                                        ui.label(badge(&kind));
+                                        ui.label(badge(&kind, &content_kind));
                                         if pinned {
                                             ui.label("📌");
                                         }
@@ -368,14 +369,25 @@ fn fuzzy_rank(query: &str, items: Vec<EntrySummary>) -> Vec<EntrySummary> {
     scored.into_iter().map(|(_, e)| e).collect()
 }
 
-fn badge(kind: &str) -> egui::RichText {
-    let color = match kind {
+/// Step 10: pick the badge label + colour. For `kind == "text"` the badge
+/// reflects the content-shape `content_kind` (url/json/hex/base64/code/text);
+/// for image/files/html/rtf the capture-format `kind` wins because shape
+/// classification isn't meaningful there.
+fn badge(kind: &str, content_kind: &str) -> egui::RichText {
+    let display = if kind == "text" { content_kind } else { kind };
+    let color = match display {
+        "url" => egui::Color32::from_rgb(120, 160, 240),
+        "json" => egui::Color32::from_rgb(240, 180, 80),
+        "hex" => egui::Color32::from_rgb(220, 120, 200),
+        "base64" => egui::Color32::from_rgb(80, 200, 200),
+        "code" => egui::Color32::from_rgb(120, 220, 120),
         "image" => egui::Color32::from_rgb(180, 120, 220),
         "files" => egui::Color32::from_rgb(220, 180, 120),
         "html" | "rtf" => egui::Color32::from_rgb(120, 180, 220),
-        _ => egui::Color32::from_rgb(120, 220, 180),
+        _ => egui::Color32::from_rgb(160, 160, 160),
     };
-    egui::RichText::new(format!(" {kind:<5} "))
+    let label = if display == "base64" { "b64" } else { display };
+    egui::RichText::new(format!(" {label:<5} "))
         .color(egui::Color32::BLACK)
         .background_color(color)
         .monospace()
@@ -400,11 +412,24 @@ mod tests {
         EntrySummary {
             id,
             kind: "text".into(),
+            content_kind: "text".into(),
             preview: preview.into(),
             created_at: last_seen,
             last_seen,
             pinned,
         }
+    }
+
+    #[test]
+    fn badge_uses_content_kind_for_text_rows() {
+        // A text row with content_kind=url should show the url label.
+        // An image row keeps the image label regardless of content_kind.
+        // A plain text+text row should show the text label.
+        assert!(badge("text", "url").text().contains("url"));
+        assert!(badge("image", "text").text().contains("image"));
+        assert!(badge("text", "text").text().contains("text"));
+        // base64 displays as the abbreviated "b64" label.
+        assert!(badge("text", "base64").text().contains("b64"));
     }
 
     #[test]

@@ -10,6 +10,11 @@
 //! v4 (Step 9): `idx_created` index over `entries.created_at DESC`. Lets the
 //!   `:today`/`:7d`/`>YYYY-MM-DD` predicates short-circuit the LIKE scan on
 //!   anything but the smallest databases.
+//! v5 (Step 10): `content_kind` column for the content-shape taxonomy
+//!   (`url|json|hex|base64|code|text`). DDL adds the column with default
+//!   `'text'`; the data step decrypts every existing text row and stamps
+//!   the classifier's verdict so pre-Step-10 rows badge correctly without
+//!   waiting on a re-capture.
 //!
 //! Migrations are version-anchored, not index-anchored, because v2 is a
 //! data-only step that needs the [`Vault`] — interleaving DDL and data
@@ -61,6 +66,10 @@ const V4_DDL: &str = r#"
     CREATE INDEX IF NOT EXISTS idx_created ON entries(created_at DESC);
 "#;
 
+const V5_DDL: &str = r#"
+    ALTER TABLE entries ADD COLUMN content_kind TEXT NOT NULL DEFAULT 'text';
+"#;
+
 /// Run every migration the DB needs to reach the current schema version,
 /// in order. Idempotent — safe to call on a fresh DB, on a v1 DB with
 /// plaintext rows, on a v2 DB, or on an already-current v3 DB.
@@ -89,6 +98,54 @@ pub fn run_all(conn: &mut Connection, vault: &Vault) -> Result<()> {
         conn.execute_batch(V4_DDL)?;
         conn.execute_batch("PRAGMA user_version = 4")?;
     }
+    if v < 5 {
+        conn.execute_batch(V5_DDL)?;
+        backfill_content_kind(conn, vault)?;
+        // backfill_content_kind commits PRAGMA user_version = 5 inside its
+        // transaction so the version stamp and the backfilled rows land
+        // atomically.
+    }
+    Ok(())
+}
+
+/// Step 10 data migration: walk every `kind == 'text'` row, decrypt the
+/// canonical content with the [`Vault`], run the content-shape classifier,
+/// and stamp `content_kind`. Image/files rows keep the column default
+/// (`'text'`) — the picker badge logic ignores `content_kind` for non-text
+/// `kind`s.
+fn backfill_content_kind(conn: &mut Connection, vault: &Vault) -> Result<()> {
+    let tx = conn.transaction()?;
+    {
+        let mut stmt =
+            tx.prepare("SELECT id, content, nonce FROM entries WHERE kind = 'text'")?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+
+        let mut update = tx.prepare("UPDATE entries SET content_kind = ?1 WHERE id = ?2")?;
+        let count = rows.len();
+        for (id, ciphertext, nonce) in rows {
+            let plaintext = vault.decrypt(&nonce, &ciphertext)?;
+            if let Ok(text) = std::str::from_utf8(&plaintext) {
+                let kind = crate::classify::classify(text);
+                update.execute(params![kind.as_str(), id])?;
+            }
+        }
+        drop(update);
+
+        if count > 0 {
+            tracing::info!(count, "v5 migration: backfilled content_kind");
+        }
+    }
+    tx.execute_batch("PRAGMA user_version = 5")?;
+    tx.commit()?;
     Ok(())
 }
 

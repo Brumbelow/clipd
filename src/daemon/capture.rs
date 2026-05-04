@@ -97,11 +97,15 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
     );
 
     let now_ms = chrono::Utc::now().timestamp_millis();
+    // Step 10: classify content shape from the canonical text. Cheap —
+    // bounded-time regex/prefix checks over the captured payload.
+    let content_kind = crate::classify::classify(&text);
     let outcome = store::insert_or_bump(
         &state.cfg.db_full_path(),
         &state.vault,
         &store::NewEntry {
             kind: "text",
+            content_kind: content_kind.as_str(),
             content: bytes,
             hash: hash.as_bytes(),
             size_bytes,
@@ -196,6 +200,10 @@ fn try_capture_image(state: &DaemonState) -> Result<()> {
         &state.vault,
         &store::NewEntry {
             kind: "image",
+            // Image rows take the column default — picker badge logic
+            // routes on `kind == "image"` and ignores content_kind for
+            // non-text kinds.
+            content_kind: "text",
             content: &dib,
             hash: hash.as_bytes(),
             size_bytes,

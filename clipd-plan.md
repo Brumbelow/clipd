@@ -263,19 +263,44 @@ Acceptance criteria are testable.
 - **Accept:** Win+PrtScn → picker shows scaled thumbnail; Enter pastes original
   image into Paint.
 
-### Step 9 — Date/time filtering
-- Picker query parser: `:today`, `:yesterday`, `:7d`, `:30d`, `>YYYY-MM-DD`,
-  `<YYYY-MM-DD`, range `YYYY-MM-DD..YYYY-MM-DD`.
-- Applied as SQL `WHERE` before FTS.
-- **Accept:** `:7d kubectl` returns only entries with "kubectl" in the last
-  7 days.
+### Step 9 — Date/time filtering ✅
+- Picker query parser at `src/picker/query.rs`: `:today`, `:yesterday`,
+  `:Nd` (any 1–3650), `>YYYY-MM-DD`, `<YYYY-MM-DD`, range
+  `YYYY-MM-DD..YYYY-MM-DD`. Anchors "today" at local-time midnight so
+  the predicate matches the user's wall clock, not UTC.
+- Filters applied as SQL `WHERE created_at` clauses before the existing
+  `LIKE '%q%'` text match. New `DateFilter` enum lives in `store::mod`,
+  serialized over IPC via `Request::Search { query, limit, filters }`.
+  Empty `query` + non-empty `filters` (the `:today` with no search term
+  case) is supported.
+- Schema v4 adds `idx_created` over `entries(created_at DESC)` to back
+  the predicates. Search SQL also gains `ORDER BY pinned DESC,
+  last_seen DESC` so pinned rows float above recency-ranked unpinned
+  rows in search results.
+- FTS5 deferred — `LIKE` is adequate up to ~10k rows and the original
+  architecture-section reference is now flagged as a v0.2 follow-up.
+- **Accept:** `:7d kubectl` returns only entries with "kubectl" in the
+  last 7 days.
 
-### Step 10 — Pinning + auto-classification
-- `kind` field auto-set: `url|json|hex|base64|code|text` based on shape of preview.
-- Picker shows colored badge per kind.
-- Pinned entries float to top, survive retention purge.
-- **Accept:** copy a URL → entry has `kind=url` badge. Pin via `Ctrl+P` in
-  picker; entry survives a forced retention purge.
+### Step 10 — Pinning + auto-classification ✅
+- New `content_kind` column (schema v5) carries the content-shape
+  taxonomy `url|json|hex|base64|code|text`, distinct from the existing
+  capture-format `kind` (`text|image|files|...`). Auto-set at capture
+  time via `src/classify/mod.rs`. The v5 migration backfills every
+  pre-Step-10 text row by decrypting + reclassifying — URLs/JSON/etc.
+  copied before the upgrade get correct badges immediately.
+- Picker `badge()` now picks colour + label by content_kind for text
+  rows and falls back to `kind` for image/files/html/rtf rows. Six new
+  colours: blue (url), orange (json), magenta (hex), cyan (base64),
+  green (code), grey (text). Image/files/html/rtf colours unchanged.
+- Pin write path was already wired (Step 5 IPC + Step 9 picker `Ctrl+P`).
+  This step adds `ORDER BY pinned DESC, last_seen DESC` to `store::list`,
+  so pinned rows float to the top of the empty-query view too — not
+  only in search results.
+- The retention-purge half of the original accept criteria is owned
+  by Step 12.
+- **Accept:** copy a URL → entry shows the `url` badge. Pin via `Ctrl+P`;
+  the row floats above newer unpinned entries.
 
 ### Step 11 — Tray + autostart
 - `tray-icon` on the daemon — quit, open config, pause/resume capture.
