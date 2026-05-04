@@ -133,6 +133,7 @@ fn cli_search(cfg: &config::Config, query: &str, limit: usize) -> Result<()> {
         daemon::ipc::Request::Search {
             query: query.to_string(),
             limit,
+            filters: Vec::new(),
         },
     )?;
     print_entries(resp);

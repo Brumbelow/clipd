@@ -96,7 +96,11 @@ fn dispatch(req: Request, state: &DaemonState) -> Response {
             Ok(rows) => Response::Entries(rows.iter().map(to_summary).collect()),
             Err(e) => Response::Error(format!("{e:#}")),
         },
-        Request::Search { query, limit } => match store::search(&db, &query, limit) {
+        Request::Search {
+            query,
+            limit,
+            filters,
+        } => match store::search(&db, &query, &filters, limit) {
             Ok(rows) => Response::Entries(rows.iter().map(to_summary).collect()),
             Err(e) => Response::Error(format!("{e:#}")),
         },
@@ -276,12 +280,57 @@ mod tests {
             Request::Search {
                 query: "kube".into(),
                 limit: 10,
+                filters: Vec::new(),
             },
         )
         .unwrap();
         let v = entries(resp);
         assert_eq!(v.len(), 1);
         assert!(v[0].preview.contains("kubectl"));
+    }
+
+    #[test]
+    fn search_with_date_filter_narrows_to_window() {
+        // Step 9: `:7d kubectl` shape — text + a single After filter.
+        let f = fixture();
+        insert_text(&f.state, "old kubectl", 1_000_000);
+        insert_text(&f.state, "new kubectl", 9_000_000);
+        insert_text(&f.state, "new git", 9_500_000);
+
+        let resp = client::send_to(
+            &f.pipe,
+            Request::Search {
+                query: "kubectl".into(),
+                limit: 10,
+                filters: vec![store::DateFilter::After(5_000_000)],
+            },
+        )
+        .unwrap();
+        let v = entries(resp);
+        assert_eq!(v.len(), 1, "After filter must drop the old row");
+        assert_eq!(v[0].preview, "new kubectl");
+    }
+
+    #[test]
+    fn search_with_only_filter_no_text() {
+        // Empty `query` + non-empty `filters` (the `:today` with no search
+        // term case) should still return matching rows.
+        let f = fixture();
+        insert_text(&f.state, "yesterday-row", 1_000_000);
+        insert_text(&f.state, "today-row", 9_000_000);
+
+        let resp = client::send_to(
+            &f.pipe,
+            Request::Search {
+                query: String::new(),
+                limit: 10,
+                filters: vec![store::DateFilter::After(5_000_000)],
+            },
+        )
+        .unwrap();
+        let v = entries(resp);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].preview, "today-row");
     }
 
     #[test]

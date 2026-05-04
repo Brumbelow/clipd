@@ -19,8 +19,24 @@ mod schema;
 use crate::daemon::clipboard_format::FormatPayload;
 use crate::store::crypto::Vault;
 use anyhow::{Context, Result};
+use rusqlite::types::Value;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
+
+/// Step 9: a date predicate applied to `entries.created_at` before the
+/// text search runs. Bounds are unix-milliseconds. Constructed by
+/// `picker::query::parse` from `:today`-style tokens, serialized over IPC,
+/// and consumed by [`search`] as `WHERE created_at` clauses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DateFilter {
+    /// `created_at >= ts`
+    After(i64),
+    /// `created_at < ts`
+    Before(i64),
+    /// `start <= created_at < end`
+    Range { start: i64, end: i64 },
+}
 
 pub struct NewEntry<'a> {
     pub kind: &'a str,
@@ -196,26 +212,60 @@ pub fn list(db_path: &Path, limit: usize) -> Result<Vec<EntryRow>> {
         .context("collecting list rows")
 }
 
-/// Substring search over `preview` for Step 5 IPC. FTS5 lands in Step 9 — this
-/// is intentionally a `LIKE` scan. Previews are stored lowercased ([`derive_preview`]),
-/// so the query is lowercased before binding to keep the match case-insensitive.
-pub fn search(db_path: &Path, query: &str, limit: usize) -> Result<Vec<EntryRow>> {
+/// Substring search over `preview` for Step 5 IPC. Step 9 layered on the
+/// `DateFilter` predicates and pinned-first ordering; the text matcher
+/// itself is still a `LIKE` scan (FTS5 deferred — adequate up to ~10k rows).
+/// Previews are stored lowercased ([`derive_preview`]), so the needle is
+/// lowercased before binding to keep the match case-insensitive.
+///
+/// Pass `&[]` for `filters` to skip date predicates. An empty `query`
+/// combined with non-empty `filters` (e.g. `:today` with no search term)
+/// is the documented case for date-only browsing.
+pub fn search(
+    db_path: &Path,
+    query: &str,
+    filters: &[DateFilter],
+    limit: usize,
+) -> Result<Vec<EntryRow>> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
     let conn = open_ro(db_path)?;
+
+    let mut sql = String::from(
+        "SELECT id, created_at, last_seen, kind, preview, pinned, size_bytes \
+         FROM entries WHERE 1=1",
+    );
+    let mut binds: Vec<Value> = Vec::new();
+
     let needle = query.to_lowercase();
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, created_at, last_seen, kind, preview, pinned, size_bytes
-             FROM entries
-             WHERE preview LIKE '%' || ?1 || '%'
-             ORDER BY last_seen DESC
-             LIMIT ?2",
-        )
-        .context("preparing search statement")?;
+    if !needle.is_empty() {
+        sql.push_str(" AND preview LIKE '%' || ? || '%'");
+        binds.push(Value::Text(needle));
+    }
+    for f in filters {
+        match f {
+            DateFilter::After(ts) => {
+                sql.push_str(" AND created_at >= ?");
+                binds.push(Value::Integer(*ts));
+            }
+            DateFilter::Before(ts) => {
+                sql.push_str(" AND created_at < ?");
+                binds.push(Value::Integer(*ts));
+            }
+            DateFilter::Range { start, end } => {
+                sql.push_str(" AND created_at >= ? AND created_at < ?");
+                binds.push(Value::Integer(*start));
+                binds.push(Value::Integer(*end));
+            }
+        }
+    }
+    sql.push_str(" ORDER BY pinned DESC, last_seen DESC LIMIT ?");
+    binds.push(Value::Integer(limit as i64));
+
+    let mut stmt = conn.prepare(&sql).context("preparing search statement")?;
     let rows = stmt
-        .query_map(params![needle, limit as i64], |r| {
+        .query_map(rusqlite::params_from_iter(binds.iter()), |r| {
             Ok(EntryRow {
                 id: r.get(0)?,
                 created_at: r.get(1)?,
@@ -457,9 +507,9 @@ mod tests {
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        // Empty DB jumps straight to v3 — v2 sweep is a no-op when there
-        // are no plaintext rows, then v3 DDL creates entry_formats.
-        assert_eq!(v, 3);
+        // Empty DB walks all migrations: v2 sweep is a no-op (no plaintext
+        // rows), v3 creates entry_formats, v4 adds idx_created.
+        assert_eq!(v, 4);
     }
 
     #[test]
@@ -638,14 +688,14 @@ mod tests {
         }
 
         // Re-open with `open_or_init` — the v2 sweep encrypts the row,
-        // and the v3 DDL adds entry_formats.
+        // the v3 DDL adds entry_formats, the v4 DDL adds idx_created.
         let _ = open_or_init(&f.db, &f.vault).unwrap();
 
         let conn = open_ro(&f.db).unwrap();
         let v: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 3, "must walk all the way to v3 in one open_or_init");
+        assert_eq!(v, 4, "must walk all the way to v4 in one open_or_init");
         let (content, nonce): (Vec<u8>, Vec<u8>) = conn
             .query_row("SELECT content, nonce FROM entries LIMIT 1", [], |r| {
                 Ok((r.get(0)?, r.get(1)?))
@@ -1040,5 +1090,106 @@ mod tests {
             .unwrap();
 
         assert!(get_thumbnail(&f.db, &f.vault, id).unwrap().is_none());
+    }
+
+    // ---- Step 9: search with date filters ----
+
+    fn insert_at(f: &Fix, text: &str, t: i64) {
+        let h = blake3::hash(text.as_bytes());
+        insert_or_bump(&f.db, &f.vault, &new_text(text, h.as_bytes(), t)).unwrap();
+    }
+
+    #[test]
+    fn search_no_filters_matches_all_with_text() {
+        let f = fixture();
+        insert_at(&f, "alpha", 1000);
+        insert_at(&f, "bravo alpha", 2000);
+        insert_at(&f, "charlie", 3000);
+
+        let rows = search(&f.db, "alpha", &[], 50).unwrap();
+        assert_eq!(rows.len(), 2);
+        // Pinned-first then last_seen DESC: "bravo alpha" (newer) before "alpha".
+        assert_eq!(rows[0].preview, "bravo alpha");
+        assert_eq!(rows[1].preview, "alpha");
+    }
+
+    #[test]
+    fn search_after_filter_excludes_old_rows() {
+        let f = fixture();
+        insert_at(&f, "old kubectl", 1_000_000);
+        insert_at(&f, "new kubectl", 5_000_000);
+
+        let rows = search(&f.db, "kubectl", &[DateFilter::After(3_000_000)], 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].preview, "new kubectl");
+    }
+
+    #[test]
+    fn search_before_filter_excludes_recent_rows() {
+        let f = fixture();
+        insert_at(&f, "old kubectl", 1_000_000);
+        insert_at(&f, "new kubectl", 5_000_000);
+
+        let rows = search(&f.db, "kubectl", &[DateFilter::Before(3_000_000)], 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].preview, "old kubectl");
+    }
+
+    #[test]
+    fn search_range_filter_brackets_window() {
+        let f = fixture();
+        insert_at(&f, "before", 500);
+        insert_at(&f, "inside", 1500);
+        insert_at(&f, "after", 2500);
+
+        let rows = search(
+            &f.db,
+            "",
+            &[DateFilter::Range {
+                start: 1000,
+                end: 2000,
+            }],
+            50,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].preview, "inside");
+    }
+
+    #[test]
+    fn search_filters_only_no_text_returns_filtered_rows() {
+        // The `:today` with no search term case — empty `query`, filters
+        // do all the narrowing.
+        let f = fixture();
+        insert_at(&f, "yesterday", 1000);
+        insert_at(&f, "today-a", 5000);
+        insert_at(&f, "today-b", 5500);
+
+        let rows = search(&f.db, "", &[DateFilter::After(3000)], 50).unwrap();
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn search_pinned_floats_to_top() {
+        // Step 9 query rewrite includes `ORDER BY pinned DESC, last_seen DESC`.
+        // An older pinned row should outrank a newer unpinned row.
+        let f = fixture();
+        insert_at(&f, "old pinned needle", 1000);
+        insert_at(&f, "new unpinned needle", 9000);
+
+        let id_old: i64 = Connection::open(&f.db)
+            .unwrap()
+            .query_row(
+                "SELECT id FROM entries WHERE preview = ?1",
+                params!["old pinned needle"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        set_pinned(&f.db, &f.vault, id_old, true).unwrap();
+
+        let rows = search(&f.db, "needle", &[], 50).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].preview, "old pinned needle");
+        assert!(rows[0].pinned);
     }
 }

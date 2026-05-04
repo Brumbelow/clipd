@@ -7,6 +7,9 @@
 //! v3 (Step 7): per-format encrypted payloads in `entry_formats` child
 //!   table. The unused `formats TEXT` column on `entries` stays in place —
 //!   `DROP COLUMN`'s risk isn't worth it pre-v0.1, and queries ignore it.
+//! v4 (Step 9): `idx_created` index over `entries.created_at DESC`. Lets the
+//!   `:today`/`:7d`/`>YYYY-MM-DD` predicates short-circuit the LIKE scan on
+//!   anything but the smallest databases.
 //!
 //! Migrations are version-anchored, not index-anchored, because v2 is a
 //! data-only step that needs the [`Vault`] — interleaving DDL and data
@@ -14,8 +17,7 @@
 //! rather than using a slice index.
 //!
 //! Deferred to later steps:
-//!   - FTS5 virtual table (Step 9)
-//!   - `idx_created` (Step 9 date filtering)
+//!   - FTS5 virtual table (post-v0.1; LIKE is adequate up to ~10k rows)
 
 use crate::store::crypto::Vault;
 use anyhow::Result;
@@ -55,6 +57,10 @@ const V3_DDL: &str = r#"
         ON entry_formats(entry_id);
 "#;
 
+const V4_DDL: &str = r#"
+    CREATE INDEX IF NOT EXISTS idx_created ON entries(created_at DESC);
+"#;
+
 /// Run every migration the DB needs to reach the current schema version,
 /// in order. Idempotent — safe to call on a fresh DB, on a v1 DB with
 /// plaintext rows, on a v2 DB, or on an already-current v3 DB.
@@ -78,6 +84,10 @@ pub fn run_all(conn: &mut Connection, vault: &Vault) -> Result<()> {
     if v < 3 {
         conn.execute_batch(V3_DDL)?;
         conn.execute_batch("PRAGMA user_version = 3")?;
+    }
+    if v < 4 {
+        conn.execute_batch(V4_DDL)?;
+        conn.execute_batch("PRAGMA user_version = 4")?;
     }
     Ok(())
 }

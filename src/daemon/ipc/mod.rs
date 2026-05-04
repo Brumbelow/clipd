@@ -6,7 +6,7 @@
 pub mod server;
 
 use crate::config::Config;
-use crate::store::EntryRow;
+use crate::store::{DateFilter, EntryRow};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +18,11 @@ pub enum Request {
     Search {
         query: String,
         limit: usize,
+        /// Step 9: zero or more `created_at` predicates. Empty for
+        /// pre-Step-9 callers and for `clipd search` CLI invocations
+        /// that don't expose date syntax yet.
+        #[serde(default)]
+        filters: Vec<DateFilter>,
     },
     Delete {
         id: i64,

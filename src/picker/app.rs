@@ -16,6 +16,7 @@
 
 use crate::config::Config;
 use crate::daemon::ipc::{self, EntrySummary, Request, Response};
+use crate::picker::query;
 use base64::Engine;
 use eframe::App;
 use std::collections::HashMap;
@@ -120,20 +121,29 @@ impl PickerApp {
         self.last_query = self.query.clone();
         self.last_query_at = Instant::now();
 
-        let req = if self.query.trim().is_empty() {
+        // Step 9: split inline date filters (`:today`, `:7d`, `>YYYY-MM-DD`,
+        // …) out of the raw input. Filters become SQL `WHERE created_at`
+        // clauses on the daemon side; `parsed.text` is the residual free
+        // text passed to the existing LIKE matcher.
+        let parsed = query::parse(&self.query, chrono::Local::now());
+        let req = if parsed.text.is_empty() && parsed.filters.is_empty() {
             Request::List {
                 limit: self.cfg.picker.result_limit,
             }
         } else {
             Request::Search {
-                query: self.query.clone(),
+                query: parsed.text.clone(),
                 limit: self.cfg.picker.result_limit,
+                filters: parsed.filters,
             }
         };
 
         match ipc::client::send(&self.cfg, req) {
             Ok(Response::Entries(entries)) => {
-                self.results = fuzzy_rank(&self.query, entries);
+                // Pass the residual free text to fuzzy_rank — the date
+                // tokens have already done their narrowing on the SQL side
+                // and would only burn nucleo cycles here.
+                self.results = fuzzy_rank(&parsed.text, entries);
                 if self.selected >= self.results.len() {
                     self.selected = self.results.len().saturating_sub(1);
                 }

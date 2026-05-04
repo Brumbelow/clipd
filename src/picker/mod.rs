@@ -5,6 +5,7 @@
 //! the daemon over the Step-5 named-pipe IPC for List/Search/Promote/Pin/Delete.
 
 mod app;
+mod query;
 
 use crate::config::Config;
 use anyhow::Result;
