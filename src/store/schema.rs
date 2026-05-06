@@ -116,8 +116,7 @@ pub fn run_all(conn: &mut Connection, vault: &Vault) -> Result<()> {
 fn backfill_content_kind(conn: &mut Connection, vault: &Vault) -> Result<()> {
     let tx = conn.transaction()?;
     {
-        let mut stmt =
-            tx.prepare("SELECT id, content, nonce FROM entries WHERE kind = 'text'")?;
+        let mut stmt = tx.prepare("SELECT id, content, nonce FROM entries WHERE kind = 'text'")?;
         let rows = stmt
             .query_map([], |r| {
                 Ok((
