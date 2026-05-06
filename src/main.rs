@@ -9,6 +9,7 @@
 mod classify;
 mod config;
 mod daemon;
+mod install;
 mod picker;
 mod secrets;
 mod store;
@@ -189,20 +190,28 @@ fn cli_doctor(cfg: &config::Config) -> Result<()> {
         Ok(_) => println!("  daemon:    UP"),
         Err(e) => println!("  daemon:    DOWN ({e})"),
     }
+    match install::autostart_enabled() {
+        Ok(true) => println!("  autostart: enabled"),
+        Ok(false) => println!("  autostart: disabled"),
+        Err(e) => println!("  autostart: unknown ({e})"),
+    }
     Ok(())
 }
 
 fn cli_install(_cfg: &config::Config, autostart: bool) -> Result<()> {
     if autostart {
-        // TODO: write HKCU\Software\Microsoft\Windows\CurrentVersion\Run\clipd
-        // pointing at the current exe with --daemon.
-        anyhow::bail!("autostart install not yet implemented (Day 11)");
+        install::enable_autostart()?;
+        println!("autostart enabled (HKCU\\…\\Run\\clipd)");
+    } else {
+        println!("nothing to do — pass --autostart to register the daemon at logon");
     }
     Ok(())
 }
 
 fn cli_uninstall(_cfg: &config::Config) -> Result<()> {
-    anyhow::bail!("uninstall not yet implemented (Day 11)");
+    install::disable_autostart()?;
+    println!("autostart removed");
+    Ok(())
 }
 
 fn print_entries(resp: daemon::ipc::Response) {
