@@ -50,6 +50,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # ---- IPC (Windows named pipes via interprocess) ----
 interprocess = "2"
 
+# ---- Tray (Step 11) ----
+# Notification-area icon + menu (Pause / Open config / Quit). Pulls `muda` for
+# menus and ~3 small transitives. Driven from a dedicated thread with its own
+# Win32 message pump.
+tray-icon = "0.23"
+
 # ---- Serde + config ----
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
