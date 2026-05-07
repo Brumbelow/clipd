@@ -315,13 +315,42 @@ Acceptance criteria are testable.
   avoid bloating the daemon process — autostart reframes "daemon at boot"
   as the norm anyway.
 
-### Step 12 — Config + retention
+### Step 12 — Config + retention ✅
 - `config.toml` at `%APPDATA%\clipd\config.toml`: hotkey, retention days,
-  max entries, excluded apps (by exe name), sensitive policy.
-- Nightly purge job: delete unpinned entries older than retention or beyond
-  `max_entries` (LRU by `last_seen`).
-- **Accept:** set retention to 1 day, age an entry past 1 day (clock manipulation
-  in test), run purge, entry gone unless pinned.
+  max entries, excluded apps (by exe name), sensitive policy. The
+  `[capture]` section adds `excluded_apps` (case-insensitive exe basename
+  list — capture skips with `Reason::ExcludedApp`) and
+  `sensitive_policy = "skip" | "mark"`. Default `skip` matches Step 3
+  behaviour. With `mark`, secret-detection reasons (regex / entropy /
+  password-manager window / browser-extension popup) insert with
+  `sensitive = 1` instead of dropping; the row is hidden from default
+  `list`/`search` queries (`WHERE sensitive = 0`). Explicit signals
+  (`ExcludeFormatFlag`, `ClipboardHistoryDisabled`, `ExcludedApp`) always
+  skip regardless of policy — those are user/app explicit refusals, not
+  heuristics. Picker `:sensitive` filter for surfacing marked rows is a
+  v0.2 follow-up.
+- `store::purge(retention_days, max_entries, now_ms)` in a single
+  transaction: age cutoff = `now_ms - days * 86_400_000`, cap deletes the
+  oldest `count - max_entries` by `last_seen ASC`. `0` disables either
+  half. Pinned rows always survive. ON DELETE CASCADE on `entry_formats`
+  (Step 7) reaps child rows. `now_ms` is parameterized so unit tests can
+  pass a synthetic clock — covers the accept criteria without touching
+  the system clock.
+- New `daemon::purge` thread spawns at daemon startup (after IPC
+  server, before picker supervisor); runs purge once on boot then sleeps
+  24h between iterations. The 24h sleep is broken into 1-min chunks so
+  `state.shutting_down` (Step 11) is observed promptly.
+- New `clipd config` subcommand with `--show` (default — pretty-print
+  effective TOML) and `--path` (resolved file path). `clipd doctor` now
+  also reports excluded-apps count and sensitive policy.
+- **Accept:** unit tests in `store::tests` cover both purge dimensions
+  with synthetic clocks: `purge_by_age_drops_unpinned_old_rows`,
+  `purge_by_cap_keeps_newest_by_last_seen`,
+  `purge_by_cap_skips_pinned_in_overage`,
+  `purge_zero_settings_is_noop`,
+  `sensitive_rows_hidden_from_list_and_search`. Capture tests cover the
+  exclude-app path: `excluded_app_basename_match_is_case_insensitive`,
+  `skip_reason_returns_excluded_app_for_listed_exe`.
 
 ### Step 13 — Polish
 - Tracing → file logger at `%APPDATA%\clipd\logs\clipd.log` with rotation.
