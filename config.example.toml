@@ -1,0 +1,55 @@
+# clipd config — copy to %APPDATA%\clipd\config.toml and edit.
+#
+# Every section below is optional. Anything you omit falls back to the
+# default shown. Run `clipd config --show` to print the effective merged
+# config; `clipd config --path` for the resolved file path.
+
+# ---------------------------------------------------------------------------
+# Global hotkey that opens the picker.
+#
+# Modifiers: win, alt, ctrl, shift (any combination, plus a single key).
+# The default avoids the Win+C collision with Windows Copilot while staying
+# close to "Win+C" muscle memory.
+[hotkey]
+chord = "win+alt+c"
+
+# ---------------------------------------------------------------------------
+# Retention policy. Both dimensions run nightly. Pinned entries are immune.
+#   days        — drop entries older than N days (0 disables age purge)
+#   max_entries — keep at most N rows; oldest by last_seen drop first (0 disables cap purge)
+[retention]
+days = 30
+max_entries = 5000
+
+# ---------------------------------------------------------------------------
+# Picker UI tuning.
+#   result_limit — maximum rows fetched per query before client-side fuzzy rerank
+[picker]
+result_limit = 200
+
+# ---------------------------------------------------------------------------
+# Sensitive-content detection (entropy heuristic). Tokens with no whitespace
+# whose length lands in [min_len, max_len] and whose Shannon entropy exceeds
+# the threshold are treated as secrets. URLs bypass this gate.
+[secrets]
+entropy_min_len = 20
+entropy_max_len = 80
+entropy_threshold = 4.5
+
+# ---------------------------------------------------------------------------
+# Capture filters.
+#   excluded_apps    — exe basenames (case-insensitive) whose foreground
+#                      captures are dropped before the secrets layer runs.
+#   sensitive_policy — what to do with detected secrets:
+#                        "skip" (default) — refuse storage entirely
+#                        "mark"           — store with sensitive=1, hidden
+#                                           from default list/search
+[capture]
+excluded_apps = []   # e.g. ["KeePassXC.exe", "1Password.exe"]
+sensitive_policy = "skip"
+
+# ---------------------------------------------------------------------------
+# Storage location override. Default: %APPDATA%\clipd\
+# Useful if you want clipd's data on a different drive (e.g. an encrypted volume).
+# [paths]
+# data_dir = "D:\\clipd-data"

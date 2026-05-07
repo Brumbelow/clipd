@@ -387,12 +387,55 @@ Acceptance criteria are testable.
   `clipd doctor` against a live daemon flips pipe → reachable and
   hotkey → registered; against a stopped daemon flips them back.
 
-### Step 14 — Release
-- GitHub Actions: Windows MSVC build, `cargo test`, signed release artifact.
-- Zipped portable: `clipd.exe` + `config.example.toml` + `README.md`.
-- v0.1.0 git tag.
-- **Accept:** download zip on a clean Win11 VM, run `clipd install --autostart`,
-  reboot, hotkey works.
+### Step 14 — Release ✅
+- `.github/workflows/release.yml` fires on `v*` tag push: Windows MSVC
+  build of the `x86_64-pc-windows-msvc` target, `cargo test`, then
+  `Compress-Archive` stages a versioned subdir
+  (`clipd-<tag>-x86_64-pc-windows-msvc/`) containing `clipd.exe`,
+  `config.example.toml`, `README.md`, `LICENSE-APACHE`. The zip is
+  attached to a **draft** GitHub Release via
+  `softprops/action-gh-release@v2` so release notes can be edited
+  before publishing. Pinned actions: `actions/checkout@v4`,
+  `dtolnay/rust-toolchain@stable`, `Swatinem/rust-cache@v2`.
+- Repo-root `README.md` covers thesis, install (download zip → unzip →
+  `clipd install --autostart` → reboot), the SmartScreen "More info →
+  Run anyway" workaround for unsigned v0.1, hotkey + picker controls,
+  date-filter search syntax, full subcommand table, config sections,
+  the threat-model defended/not-defended split, log location.
+- `config.example.toml` documents every `[hotkey] / [retention] /
+  [picker] / [secrets] / [capture] / [paths]` field with default
+  values and one-line descriptions. `[paths].data_dir` left
+  commented-out so the default `%APPDATA%\clipd\` resolution wins
+  out of the box.
+- `LICENSE-APACHE` at repo root (Apache 2.0 only — single license,
+  not the dual-license originally drafted). `Cargo.toml` license
+  metadata updated to `"Apache-2.0"` and `readme = "README.md"` added.
+- Code signing intentionally **deferred** to Step 15 — v0.1 ships
+  unsigned. README documents the SmartScreen workaround so first-run
+  isn't a dead end.
+- v0.1.0 tag intentionally **not pushed by this commit** — author will
+  tag from GitHub or locally when ready, which fires `release.yml`.
+- **Accept (this turn):** workflow file is recognized by GitHub Actions
+  on push (Actions tab shows `release.yml`, no runs yet). Local
+  `cargo build --release` + `cargo test` + `cargo clippy --all-targets
+  -- -D warnings` all clean.
+- **Accept (full release, post-tag):** download draft-release zip on a
+  clean Win11 VM, unzip, run `clipd install --autostart`, reboot,
+  press `Win+Alt+C` — picker opens.
+
+### Step 15 — Code signing (deferred from Step 14)
+- Awaiting Azure-verified identity → OV/EV code signing certificate.
+- Once cert is in hand: add `signtool sign /tr <RFC3161 timestamp URL>
+  /td sha256 /fd sha256 /f $env:SIGNING_CERT_PFX /p
+  $env:SIGNING_CERT_PASSWORD target/.../release/clipd.exe` step to
+  `release.yml` between `cargo build --release` and the staging step.
+  Secrets `SIGNING_CERT_PFX_BASE64` + `SIGNING_CERT_PASSWORD` set in
+  the GitHub repo settings; the step decodes the base64 to a temp PFX
+  before invocation. EV certs that live on hardware tokens need a
+  self-hosted runner — re-evaluate at cert delivery time.
+- **Accept:** signed clipd.exe runs on a clean Win11 VM without the
+  SmartScreen "Windows protected your PC" prompt. Update README to
+  remove the "First-run SmartScreen warning" section.
 
 ---
 

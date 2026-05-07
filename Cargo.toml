@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2021"
 authors = ["Andrew Brumbelow"]
 description = "Local-first clipboard history manager for Windows 11"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/Brumbelow/clipd"
+readme = "README.md"
 rust-version = "1.78"
 
 [[bin]]
