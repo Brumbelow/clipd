@@ -302,7 +302,7 @@ Acceptance criteria are testable.
 - **Accept:** copy a URL → entry shows the `url` badge. Pin via `Ctrl+P`;
   the row floats above newer unpinned entries.
 
-### Step 11 — Tray + autostart
+### Step 11 — Tray + autostart ✅
 - `tray-icon` on the daemon — quit, open config, pause/resume capture.
 - `clipd install --autostart` writes `HKCU\...\Run\clipd` registry key.
 - **Accept:** reboot → daemon starts → tray icon visible → hotkey works.
