@@ -232,6 +232,7 @@ mod tests {
                 preview: store::derive_preview(text),
                 source_app: None,
                 formats: &[],
+                sensitive: false,
             },
         )
         .unwrap();
@@ -414,6 +415,7 @@ mod tests {
                 preview: "unknown-bytes".into(),
                 source_app: None,
                 formats: &[],
+                sensitive: false,
             },
         )
         .unwrap();
@@ -482,6 +484,7 @@ mod tests {
                     name: "clipd:png_thumb".into(),
                     bytes: png_bytes.clone(),
                 }],
+                sensitive: false,
             },
         )
         .unwrap();

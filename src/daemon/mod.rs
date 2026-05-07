@@ -17,6 +17,7 @@ pub mod clipboard_format;
 pub mod image;
 pub mod ipc;
 pub mod picker_supervisor;
+pub mod purge;
 pub mod tray;
 pub mod win_hook;
 
@@ -72,6 +73,9 @@ pub fn run(cfg: Config) -> Result<()> {
     let vault = Vault::open(&key_path).context("opening clipd vault (DPAPI key)")?;
     let state = DaemonState::new(Arc::new(cfg), Arc::new(vault));
     ipc::server::spawn(state.clone()).context("starting IPC server")?;
+    // Step 12: nightly retention purge. Detached thread; observes
+    // `state.shutting_down` to exit cleanly with the daemon.
+    let _ = purge::spawn(state.clone());
     // Step 11: prewarm the picker so WM_HOTKEY can re-show instead of
     // fork-execing a fresh process per press.
     if let Err(e) = picker_supervisor::spawn(state.clone()) {

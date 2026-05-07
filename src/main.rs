@@ -79,6 +79,16 @@ enum Cmd {
     /// Print diagnostics: config, key file, DB integrity, named pipe reachability.
     Doctor,
 
+    /// Print effective config or its file path.
+    Config {
+        /// Print the resolved config file path.
+        #[arg(long)]
+        path: bool,
+        /// Print the effective config as TOML (default if no flag given).
+        #[arg(long)]
+        show: bool,
+    },
+
     /// Install autostart registry entry (HKCU\...\Run\clipd).
     Install {
         #[arg(long)]
@@ -109,6 +119,7 @@ fn main() -> Result<()> {
         Some(Cmd::Pause) => cli_send(&cfg, daemon::ipc::Request::Pause),
         Some(Cmd::Resume) => cli_send(&cfg, daemon::ipc::Request::Resume),
         Some(Cmd::Doctor) => cli_doctor(&cfg),
+        Some(Cmd::Config { path, show }) => cli_config(&cfg, path, show),
         Some(Cmd::Install { autostart }) => cli_install(&cfg, autostart),
         Some(Cmd::Uninstall) => cli_uninstall(&cfg),
     }
@@ -193,6 +204,14 @@ fn cli_doctor(cfg: &config::Config) -> Result<()> {
         "  retention: {} days, max {} entries",
         cfg.retention.days, cfg.retention.max_entries
     );
+    println!(
+        "  excluded:  {} app(s)",
+        cfg.capture.excluded_apps.len()
+    );
+    println!(
+        "  sensitive: policy={:?}",
+        cfg.capture.sensitive_policy
+    );
     match daemon::ipc::client::send(cfg, daemon::ipc::Request::Ping) {
         Ok(_) => println!("  daemon:    UP"),
         Err(e) => println!("  daemon:    DOWN ({e})"),
@@ -202,6 +221,18 @@ fn cli_doctor(cfg: &config::Config) -> Result<()> {
         Ok(false) => println!("  autostart: disabled"),
         Err(e) => println!("  autostart: unknown ({e})"),
     }
+    Ok(())
+}
+
+fn cli_config(cfg: &config::Config, path: bool, show: bool) -> Result<()> {
+    if path {
+        println!("{}", cfg.source_path.display());
+        return Ok(());
+    }
+    // Default behavior (no flags or --show): pretty-print effective config.
+    let _ = show;
+    let serialized = toml::to_string_pretty(cfg).context("serializing config to TOML")?;
+    print!("{serialized}");
     Ok(())
 }
 

@@ -30,6 +30,7 @@ pub enum Verdict {
 pub enum Reason {
     ExcludeFormatFlag,
     ClipboardHistoryDisabled,
+    ExcludedApp,
     PasswordManagerWindow,
     BrowserExtensionPopup,
     KnownSecretPattern,
@@ -41,11 +42,23 @@ impl Reason {
         match self {
             Reason::ExcludeFormatFlag => "exclude_format_flag",
             Reason::ClipboardHistoryDisabled => "clipboard_history_disabled",
+            Reason::ExcludedApp => "excluded_app",
             Reason::PasswordManagerWindow => "password_manager_window",
             Reason::BrowserExtensionPopup => "browser_extension_popup",
             Reason::KnownSecretPattern => "known_secret_pattern",
             Reason::HighEntropyToken => "high_entropy_token",
         }
+    }
+
+    /// True for reasons driven by user/app explicit signals (clipboard
+    /// flags, excluded-apps list). These always skip storage regardless
+    /// of `sensitive_policy`. Heuristic reasons (regex / entropy / window
+    /// title / browser popup) honor the policy.
+    pub fn is_explicit_skip(self) -> bool {
+        matches!(
+            self,
+            Reason::ExcludeFormatFlag | Reason::ClipboardHistoryDisabled | Reason::ExcludedApp
+        )
     }
 }
 

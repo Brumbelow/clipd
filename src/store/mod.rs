@@ -54,6 +54,10 @@ pub struct NewEntry<'a> {
     /// EnumClipboardFormats order. Empty slice = text-only legacy capture
     /// or pre-Step-7 row; promote falls back to the `set_text` path.
     pub formats: &'a [FormatPayload],
+    /// Step 12: when `sensitive_policy = "mark"`, the secrets layer routes
+    /// detected-secret captures here with `sensitive = true` instead of
+    /// dropping them. Hidden from default `list`/`search` queries.
+    pub sensitive: bool,
 }
 
 pub enum Outcome {
@@ -147,7 +151,7 @@ pub fn insert_or_bump(db_path: &Path, vault: &Vault, e: &NewEntry) -> Result<Out
         "INSERT INTO entries
             (created_at, last_seen, kind, content_kind, content, nonce, preview,
              source_app, pinned, sensitive, hash, size_bytes, formats)
-         VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?8, ?9, NULL)",
+         VALUES (?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, NULL)",
         params![
             e.created_at,
             e.kind,
@@ -156,6 +160,7 @@ pub fn insert_or_bump(db_path: &Path, vault: &Vault, e: &NewEntry) -> Result<Out
             nonce,
             e.preview,
             e.source_app,
+            e.sensitive as i64,
             e.hash,
             e.size_bytes as i64,
         ],
@@ -198,6 +203,7 @@ pub fn list(db_path: &Path, limit: usize) -> Result<Vec<EntryRow>> {
         .prepare(
             "SELECT id, created_at, last_seen, kind, content_kind, preview, pinned, size_bytes
              FROM entries
+             WHERE sensitive = 0
              ORDER BY pinned DESC, last_seen DESC
              LIMIT ?1",
         )
@@ -242,7 +248,7 @@ pub fn search(
 
     let mut sql = String::from(
         "SELECT id, created_at, last_seen, kind, content_kind, preview, pinned, size_bytes \
-         FROM entries WHERE 1=1",
+         FROM entries WHERE sensitive = 0",
     );
     let mut binds: Vec<Value> = Vec::new();
 
@@ -410,6 +416,76 @@ pub fn get_thumbnail(db_path: &Path, vault: &Vault, id: i64) -> Result<Option<Ve
     }
 }
 
+/// Step 12: rows removed by [`purge`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PurgeStats {
+    pub by_age: usize,
+    pub by_cap: usize,
+}
+
+/// Step 12: drop unpinned entries past the retention window or beyond the
+/// configured cap. `now_ms` is parameterized so tests can pass a synthetic
+/// clock — production callers pass `chrono::Utc::now().timestamp_millis()`.
+///
+/// `retention_days = 0` disables the age cutoff. `max_entries = 0` disables
+/// the cap. Pinned rows (`pinned = 1`) are never purged. ON DELETE CASCADE
+/// on `entry_formats` reaps child rows.
+pub fn purge(
+    db_path: &Path,
+    retention_days: u32,
+    max_entries: u32,
+    now_ms: i64,
+) -> Result<PurgeStats> {
+    if !db_path.exists() {
+        return Ok(PurgeStats::default());
+    }
+    let mut conn = Connection::open(db_path).context("opening sqlite db (purge)")?;
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .context("enabling foreign_keys (purge)")?;
+    let tx = conn.transaction().context("opening purge transaction")?;
+    let mut stats = PurgeStats::default();
+
+    if retention_days > 0 {
+        let cutoff = now_ms - (retention_days as i64) * 86_400_000;
+        let n = tx
+            .execute(
+                "DELETE FROM entries WHERE pinned = 0 AND created_at < ?1",
+                params![cutoff],
+            )
+            .context("DELETE entries by age")?;
+        stats.by_age = n;
+    }
+
+    if max_entries > 0 {
+        let unpinned: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE pinned = 0",
+                [],
+                |r| r.get(0),
+            )
+            .context("count unpinned (purge)")?;
+        let excess = unpinned - max_entries as i64;
+        if excess > 0 {
+            let n = tx
+                .execute(
+                    "DELETE FROM entries
+                     WHERE id IN (
+                        SELECT id FROM entries
+                         WHERE pinned = 0
+                         ORDER BY last_seen ASC
+                         LIMIT ?1
+                     )",
+                    params![excess],
+                )
+                .context("DELETE entries by cap")?;
+            stats.by_cap = n;
+        }
+    }
+
+    tx.commit().context("commit purge transaction")?;
+    Ok(stats)
+}
+
 /// Set or clear the `pinned` flag. Returns `true` if a row matched.
 pub fn set_pinned(db_path: &Path, vault: &Vault, id: i64, pinned: bool) -> Result<bool> {
     let conn = open_or_init(db_path, vault)?;
@@ -472,6 +548,7 @@ mod tests {
             preview: derive_preview(text),
             source_app: None,
             formats: &[],
+            sensitive: false,
         }
     }
 
@@ -491,6 +568,7 @@ mod tests {
             preview: derive_preview(text),
             source_app: None,
             formats,
+            sensitive: false,
         }
     }
 
@@ -1034,6 +1112,7 @@ mod tests {
                 preview: "image (1x1)".into(),
                 source_app: None,
                 formats: &formats,
+                sensitive: false,
             },
         )
         .unwrap();
@@ -1095,6 +1174,7 @@ mod tests {
                 preview: "image (2x2)".into(),
                 source_app: None,
                 formats: &formats,
+                sensitive: false,
             },
         )
         .unwrap();
@@ -1213,6 +1293,128 @@ mod tests {
         assert!(rows[0].pinned);
     }
 
+    // ---- Step 12: retention purge ----
+
+    #[test]
+    fn purge_no_db_is_noop() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("missing.db");
+        let stats = purge(&missing, 1, 100, 10_000).unwrap();
+        assert_eq!(stats, PurgeStats::default());
+    }
+
+    #[test]
+    fn purge_by_age_drops_unpinned_old_rows() {
+        let f = fixture();
+        let day_ms: i64 = 86_400_000;
+        insert_at(&f, "two-days-old", 0);
+        insert_at(&f, "still-fresh", 2 * day_ms);
+
+        // Pin the old one — must survive the purge.
+        let id_old: i64 = Connection::open(&f.db)
+            .unwrap()
+            .query_row(
+                "SELECT id FROM entries WHERE preview = ?1",
+                params!["two-days-old"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        set_pinned(&f.db, &f.vault, id_old, true).unwrap();
+
+        // Add another old unpinned row that should get culled.
+        insert_at(&f, "old-unpinned", 500);
+
+        let now = 3 * day_ms;
+        let stats = purge(&f.db, 1, 0, now).unwrap();
+        assert_eq!(stats.by_age, 1, "only the unpinned old row gets purged");
+
+        let rows = list(&f.db, 50).unwrap();
+        let previews: Vec<_> = rows.iter().map(|r| r.preview.as_str()).collect();
+        assert!(previews.contains(&"two-days-old"), "pinned survives age purge");
+        assert!(previews.contains(&"still-fresh"));
+        assert!(!previews.contains(&"old-unpinned"));
+    }
+
+    #[test]
+    fn purge_by_cap_keeps_newest_by_last_seen() {
+        let f = fixture();
+        for i in 0..10 {
+            insert_at(&f, &format!("entry-{i}"), i * 1000);
+        }
+        let stats = purge(&f.db, 0, 3, 1_000_000).unwrap();
+        assert_eq!(stats.by_cap, 7);
+
+        let rows = list(&f.db, 50).unwrap();
+        assert_eq!(rows.len(), 3);
+        // list is ordered DESC by last_seen → newest first.
+        assert_eq!(rows[0].preview, "entry-9");
+        assert_eq!(rows[1].preview, "entry-8");
+        assert_eq!(rows[2].preview, "entry-7");
+    }
+
+    #[test]
+    fn purge_by_cap_skips_pinned_in_overage() {
+        // Cap = 2, 5 rows total, 1 pinned. Pinned does not count toward the
+        // cap and is never deleted; we should drop 3 oldest unpinned.
+        let f = fixture();
+        for i in 0..5 {
+            insert_at(&f, &format!("e{i}"), i * 1000);
+        }
+        let id_first: i64 = Connection::open(&f.db)
+            .unwrap()
+            .query_row(
+                "SELECT id FROM entries WHERE preview = 'e0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        set_pinned(&f.db, &f.vault, id_first, true).unwrap();
+
+        let stats = purge(&f.db, 0, 2, 1_000_000).unwrap();
+        assert_eq!(stats.by_cap, 2, "drop oldest two unpinned (e1, e2)");
+
+        let rows = list(&f.db, 50).unwrap();
+        let previews: Vec<_> = rows.iter().map(|r| r.preview.as_str()).collect();
+        assert_eq!(rows.len(), 3);
+        assert!(previews.contains(&"e0")); // pinned
+        assert!(previews.contains(&"e3"));
+        assert!(previews.contains(&"e4"));
+    }
+
+    #[test]
+    fn purge_zero_settings_is_noop() {
+        let f = fixture();
+        for i in 0..5 {
+            insert_at(&f, &format!("z{i}"), i * 1000);
+        }
+        let stats = purge(&f.db, 0, 0, 999_999).unwrap();
+        assert_eq!(stats, PurgeStats::default());
+        assert_eq!(list(&f.db, 50).unwrap().len(), 5);
+    }
+
+    // ---- Step 12: sensitive=1 hidden from list/search ----
+
+    #[test]
+    fn sensitive_rows_hidden_from_list_and_search() {
+        let f = fixture();
+        let normal = "regular-text";
+        let secret = "ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let nh = blake3::hash(normal.as_bytes());
+        let sh = blake3::hash(secret.as_bytes());
+        insert_or_bump(&f.db, &f.vault, &new_text(normal, nh.as_bytes(), 1000)).unwrap();
+        let mut sensitive_entry = new_text(secret, sh.as_bytes(), 2000);
+        sensitive_entry.sensitive = true;
+        insert_or_bump(&f.db, &f.vault, &sensitive_entry).unwrap();
+
+        let rows = list(&f.db, 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].preview, normal);
+
+        let rows = search(&f.db, "", &[], 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].preview, normal);
+    }
+
     #[test]
     fn capture_records_content_kind() {
         let f = fixture();
@@ -1233,6 +1435,7 @@ mod tests {
                 preview: derive_preview(url),
                 source_app: None,
                 formats: &[],
+                sensitive: false,
             },
         )
         .unwrap();

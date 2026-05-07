@@ -19,6 +19,8 @@ pub struct Config {
     #[serde(default)]
     pub secrets: SecretsConfig,
     #[serde(default)]
+    pub capture: CaptureConfig,
+    #[serde(default)]
     pub paths: PathsConfig,
 }
 
@@ -79,6 +81,24 @@ impl Default for SecretsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CaptureConfig {
+    /// Exe basenames (case-insensitive, e.g. "keepassxc.exe") whose
+    /// foreground captures are dropped before the secrets layer runs.
+    #[serde(default)]
+    pub excluded_apps: Vec<String>,
+    #[serde(default)]
+    pub sensitive_policy: SensitivePolicy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SensitivePolicy {
+    #[default]
+    Skip,
+    Mark,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PathsConfig {
     pub data_dir: Option<PathBuf>,
 }
@@ -120,6 +140,7 @@ impl Default for Config {
             retention: Default::default(),
             picker: Default::default(),
             secrets: Default::default(),
+            capture: Default::default(),
             paths: Default::default(),
         }
     }
@@ -130,4 +151,31 @@ fn default_config_path() -> PathBuf {
         .unwrap_or_default()
         .join("clipd")
         .join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_section_parses() {
+        let toml_src = r#"
+            [capture]
+            excluded_apps = ["KeePassXC.exe", "1password.exe"]
+            sensitive_policy = "mark"
+        "#;
+        let cfg: Config = toml::from_str(toml_src).expect("parse");
+        assert_eq!(
+            cfg.capture.excluded_apps,
+            vec!["KeePassXC.exe".to_string(), "1password.exe".to_string()]
+        );
+        assert_eq!(cfg.capture.sensitive_policy, SensitivePolicy::Mark);
+    }
+
+    #[test]
+    fn capture_section_defaults_when_absent() {
+        let cfg: Config = toml::from_str("").expect("parse empty");
+        assert!(cfg.capture.excluded_apps.is_empty());
+        assert_eq!(cfg.capture.sensitive_policy, SensitivePolicy::Skip);
+    }
 }

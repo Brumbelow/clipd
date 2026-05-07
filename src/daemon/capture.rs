@@ -8,6 +8,7 @@
 //! **Logging contract (AGENTS rule 8/123):** metadata only. Never log
 //! preview text, content bytes, hashes, or other content-derived values.
 
+use crate::config::{CaptureConfig, SensitivePolicy};
 use crate::daemon::clipboard_format;
 use crate::daemon::clipboard_format::FormatPayload;
 use crate::daemon::image as clipd_image;
@@ -40,8 +41,14 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
 
     let had_exclude_flag = has_registered_format(EXCLUDE_FORMAT);
     let history_flag = read_clipboard_history_flag();
-    if let Some(reason) = skip_reason(None, fg, had_exclude_flag, history_flag, &state.cfg.secrets)
-    {
+    if let Some(reason) = skip_reason(
+        None,
+        fg,
+        had_exclude_flag,
+        history_flag,
+        &state.cfg.capture,
+        &state.cfg.secrets,
+    ) {
         log_skip("unknown", None, reason);
         return Ok(());
     }
@@ -67,16 +74,32 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
         return Ok(());
     }
 
-    if let Some(reason) = skip_reason(
+    let mark_sensitive = match skip_reason(
         Some(&text),
         fg,
         had_exclude_flag,
         history_flag,
+        &state.cfg.capture,
         &state.cfg.secrets,
     ) {
-        log_skip("text", Some(size_bytes), reason);
-        return Ok(());
-    }
+        None => false,
+        Some(reason) => {
+            // Explicit signals (clipboard flags, excluded apps) always skip.
+            // Heuristic detections honor `sensitive_policy = "mark"`.
+            if reason.is_explicit_skip()
+                || state.cfg.capture.sensitive_policy == SensitivePolicy::Skip
+            {
+                log_skip("text", Some(size_bytes), reason);
+                return Ok(());
+            }
+            tracing::info!(
+                size_bytes,
+                reason = reason.as_str(),
+                "marking sensitive (policy=mark)"
+            );
+            true
+        }
+    };
 
     let bytes = text.as_bytes();
     let hash = blake3::hash(bytes);
@@ -113,6 +136,7 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
             preview: store::derive_preview(&text),
             source_app: None,
             formats: &captured_formats,
+            sensitive: mark_sensitive,
         },
     )?;
 
@@ -211,6 +235,7 @@ fn try_capture_image(state: &DaemonState) -> Result<()> {
             preview: store::derive_preview(&preview),
             source_app: None,
             formats: &derived,
+            sensitive: false,
         },
     )?;
 
@@ -274,13 +299,17 @@ fn skip_reason(
     fg: &ForegroundInfo,
     had_exclude_flag: bool,
     history_flag: ClipboardHistoryFlag,
-    cfg: &crate::config::SecretsConfig,
+    capture_cfg: &CaptureConfig,
+    secrets_cfg: &crate::config::SecretsConfig,
 ) -> Option<Reason> {
     if had_exclude_flag {
         return Some(Reason::ExcludeFormatFlag);
     }
     if history_flag == ClipboardHistoryFlag::Deny {
         return Some(Reason::ClipboardHistoryDisabled);
+    }
+    if is_excluded_app(fg, &capture_cfg.excluded_apps) {
+        return Some(Reason::ExcludedApp);
     }
 
     // Browser-extension-popup signal does not depend on text contents — fire
@@ -290,10 +319,35 @@ fn skip_reason(
     }
 
     let text = text?;
-    match secrets::classify(text, fg.title.as_deref(), fg.image.as_deref(), false, cfg) {
+    match secrets::classify(
+        text,
+        fg.title.as_deref(),
+        fg.image.as_deref(),
+        false,
+        secrets_cfg,
+    ) {
         Verdict::Ok => None,
         Verdict::Sensitive(reason) => Some(reason),
     }
+}
+
+/// Step 12: case-insensitive basename match against the configured
+/// `[capture] excluded_apps` list. Empty list short-circuits.
+fn is_excluded_app(fg: &ForegroundInfo, excluded: &[String]) -> bool {
+    if excluded.is_empty() {
+        return false;
+    }
+    let Some(image) = fg.image.as_deref() else {
+        return false;
+    };
+    let basename = image
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(image)
+        .to_ascii_lowercase();
+    excluded
+        .iter()
+        .any(|e| e.to_ascii_lowercase() == basename)
 }
 
 fn log_skip(kind: &str, size_bytes: Option<usize>, reason: Reason) {
@@ -310,7 +364,7 @@ fn log_skip(kind: &str, size_bytes: Option<usize>, reason: Reason) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SecretsConfig;
+    use crate::config::{CaptureConfig, SecretsConfig};
 
     fn fg_none() -> ForegroundInfo {
         ForegroundInfo {
@@ -367,6 +421,7 @@ mod tests {
                 &fg_none(),
                 true,
                 ClipboardHistoryFlag::Missing,
+                &CaptureConfig::default(),
                 &cfg
             ),
             Some(Reason::ExcludeFormatFlag)
@@ -377,6 +432,7 @@ mod tests {
                 &fg_none(),
                 false,
                 ClipboardHistoryFlag::Deny,
+                &CaptureConfig::default(),
                 &cfg
             ),
             Some(Reason::ClipboardHistoryDisabled)
@@ -392,6 +448,7 @@ mod tests {
                 &fg(Some("Personal Password Vault"), None),
                 false,
                 ClipboardHistoryFlag::Missing,
+                &CaptureConfig::default(),
                 &cfg
             ),
             Some(Reason::PasswordManagerWindow)
@@ -402,6 +459,7 @@ mod tests {
                 &fg_none(),
                 false,
                 ClipboardHistoryFlag::Missing,
+                &CaptureConfig::default(),
                 &cfg
             ),
             Some(Reason::KnownSecretPattern)
@@ -423,6 +481,7 @@ mod tests {
                 ),
                 false,
                 ClipboardHistoryFlag::Missing,
+                &CaptureConfig::default(),
                 &cfg
             ),
             Some(Reason::BrowserExtensionPopup)
@@ -443,9 +502,66 @@ mod tests {
                 ),
                 false,
                 ClipboardHistoryFlag::Missing,
+                &CaptureConfig::default(),
                 &cfg
             ),
             None
+        );
+    }
+
+    #[test]
+    fn excluded_app_basename_match_is_case_insensitive() {
+        let excluded = vec!["KeePassXC.exe".to_string()];
+        assert!(is_excluded_app(
+            &fg(None, Some(r"C:\Program Files\KeePassXC\keepassxc.exe")),
+            &excluded,
+        ));
+        assert!(is_excluded_app(
+            &fg(None, Some(r"C:\Program Files\KeePassXC\KEEPASSXC.EXE")),
+            &excluded,
+        ));
+    }
+
+    #[test]
+    fn excluded_app_does_not_match_unrelated_exe() {
+        let excluded = vec!["1password.exe".to_string()];
+        assert!(!is_excluded_app(
+            &fg(None, Some(r"C:\Windows\System32\notepad.exe")),
+            &excluded,
+        ));
+    }
+
+    #[test]
+    fn excluded_app_empty_list_short_circuits() {
+        assert!(!is_excluded_app(
+            &fg(None, Some(r"C:\Windows\System32\notepad.exe")),
+            &[],
+        ));
+    }
+
+    #[test]
+    fn excluded_app_no_image_does_not_panic() {
+        let excluded = vec!["something.exe".to_string()];
+        assert!(!is_excluded_app(&fg(None, None), &excluded));
+    }
+
+    #[test]
+    fn skip_reason_returns_excluded_app_for_listed_exe() {
+        let cap = CaptureConfig {
+            excluded_apps: vec!["notepad.exe".to_string()],
+            ..Default::default()
+        };
+        let cfg = SecretsConfig::default();
+        assert_eq!(
+            skip_reason(
+                Some("plain text"),
+                &fg(Some("Untitled - Notepad"), Some(r"C:\Windows\System32\notepad.exe")),
+                false,
+                ClipboardHistoryFlag::Missing,
+                &cap,
+                &cfg,
+            ),
+            Some(Reason::ExcludedApp)
         );
     }
 }
