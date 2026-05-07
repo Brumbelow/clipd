@@ -16,6 +16,8 @@ mod store;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser, Debug)]
@@ -100,10 +102,13 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
-    init_tracing()?;
-
     let cli = Cli::parse();
+    // Step 13: load config before init_tracing so the file logger can
+    // write inside the resolved data dir (`%APPDATA%\clipd\logs\`). The
+    // tiny window before init_tracing — clap parse + one TOML read —
+    // can't emit tracing events anyway, so reordering loses nothing.
     let cfg = config::Config::load_or_default(cli.config.as_deref()).context("loading config")?;
+    init_tracing(&cfg)?;
 
     if cli.daemon {
         return daemon::run(cfg);
@@ -125,13 +130,98 @@ fn main() -> Result<()> {
     }
 }
 
-fn init_tracing() -> Result<()> {
+fn init_tracing(cfg: &config::Config) -> Result<()> {
+    // Step 13: layered subscriber — console (stderr, default) plus a
+    // daily-rotating file appender at `%APPDATA%\clipd\logs\clipd.log.<date>`.
+    //
+    // Synchronous writes (no `tracing_appender::non_blocking`) are
+    // deliberate: release builds set `panic = "abort"` in Cargo.toml, which
+    // skips Drop and would race a background flush thread against process
+    // termination — exactly when we most need the panic line on disk. The
+    // logging volume here is tiny (one line per copy event), so blocking
+    // the WM_CLIPBOARDUPDATE handler on a file write is acceptable.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
+    let console_layer = tracing_subscriber::fmt::layer().with_target(false);
+    let file_layer = match build_file_appender(&cfg.logs_dir()) {
+        Ok(appender) => Some(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(appender),
+        ),
+        Err(e) => {
+            // Don't fail startup over logging — surface and continue with
+            // console-only. `clipd doctor` will show the empty logs dir.
+            eprintln!("clipd: file logger disabled: {e:#}");
+            None
+        }
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(console_layer)
+        .with(file_layer)
         .init();
+
+    install_panic_hook();
     Ok(())
+}
+
+fn build_file_appender(
+    logs_dir: &std::path::Path,
+) -> Result<tracing_appender::rolling::RollingFileAppender> {
+    std::fs::create_dir_all(logs_dir)
+        .with_context(|| format!("creating logs dir {}", logs_dir.display()))?;
+    tracing_appender::rolling::Builder::new()
+        .rotation(tracing_appender::rolling::Rotation::DAILY)
+        .filename_prefix("clipd")
+        .filename_suffix("log")
+        .max_log_files(14)
+        .build(logs_dir)
+        .context("building rolling file appender")
+}
+
+/// Step 13: panic hook that logs the message, source location, thread name,
+/// and a forced backtrace via `tracing::error!` so it lands in both the
+/// console and file subscribers. Guarded by `Once` because the picker
+/// supervisor relaunches `clipd pick --prewarm` and tests re-init the
+/// process; double-installing would chain hooks and double-log.
+fn install_panic_hook() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info.payload();
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "<unknown>".to_string());
+            let thread = std::thread::current()
+                .name()
+                .unwrap_or("<unnamed>")
+                .to_string();
+            // `force_capture` ignores RUST_BACKTRACE; we always want the
+            // trace in the daemon's log even when the env var isn't set.
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            tracing::error!(
+                target: "clipd::panic",
+                thread = %thread,
+                location = %location,
+                backtrace = %backtrace,
+                "panic: {msg}"
+            );
+            // Defer to the previous (default) hook so stderr-attached
+            // builds still print the standard panic summary.
+            prev(info);
+        }));
+    });
 }
 
 // ---- thin CLI wrappers — all real work goes through the daemon over IPC ----
@@ -197,25 +287,85 @@ fn expect_ok(resp: daemon::ipc::Response) -> Result<()> {
 fn cli_doctor(cfg: &config::Config) -> Result<()> {
     println!("clipd doctor");
     println!("  config:    {}", cfg.source_path.display());
-    println!("  db:        {}", cfg.db_full_path().display());
-    println!("  key:       {}", cfg.key_full_path().display());
-    println!("  hotkey:    {}", cfg.hotkey.chord);
+    println!("  logs:      {}", cfg.logs_dir().display());
     println!(
         "  retention: {} days, max {} entries",
         cfg.retention.days, cfg.retention.max_entries
     );
-    println!(
-        "  excluded:  {} app(s)",
-        cfg.capture.excluded_apps.len()
-    );
-    println!(
-        "  sensitive: policy={:?}",
-        cfg.capture.sensitive_policy
-    );
-    match daemon::ipc::client::send(cfg, daemon::ipc::Request::Ping) {
-        Ok(_) => println!("  daemon:    UP"),
-        Err(e) => println!("  daemon:    DOWN ({e})"),
+    println!("  excluded:  {} app(s)", cfg.capture.excluded_apps.len());
+    println!("  sensitive: policy={:?}", cfg.capture.sensitive_policy);
+
+    // Step 13: key file probe. `Vault::probe` reads + DPAPI-unwraps without
+    // creating the file (`Vault::open` would side-effect a fresh key).
+    let key_path = cfg.key_full_path();
+    if !key_path.exists() {
+        println!(
+            "  key:       {} (missing — will be created on first daemon run)",
+            key_path.display()
+        );
+    } else {
+        match store::crypto::Vault::probe(&key_path) {
+            Ok(bytes) => println!(
+                "  key:       {} (present, {} bytes, decryptable)",
+                key_path.display(),
+                bytes
+            ),
+            Err(e) => println!(
+                "  key:       {} (present but DPAPI unwrap failed: {e})",
+                key_path.display()
+            ),
+        }
     }
+
+    // Step 13: DB integrity probe. PRAGMA integrity_check returns "ok" on
+    // a healthy file; anything else is a red flag (truncation, page
+    // corruption, missing tables, etc.).
+    let db_path = cfg.db_full_path();
+    if !db_path.exists() {
+        println!("  db:        {} (not yet created)", db_path.display());
+    } else {
+        match store::integrity_check(&db_path) {
+            Ok(ref s) if s == "ok" => {
+                println!("  db:        {} (integrity: ok)", db_path.display())
+            }
+            Ok(s) => {
+                println!("  db:        {} (integrity FAIL):", db_path.display());
+                for line in s.lines() {
+                    println!("             {line}");
+                }
+            }
+            Err(e) => println!("  db:        {} (integrity probe failed: {e})", db_path.display()),
+        }
+    }
+
+    // Step 13: pipe reachability + derived hotkey-registration status. The
+    // daemon bails on RegisterHotKey failure (src/daemon/win_hook.rs), so a
+    // running daemon proves the chord is bound to its message-only window.
+    let daemon_up = match daemon::ipc::client::send(cfg, daemon::ipc::Request::Ping) {
+        Ok(_) => {
+            println!(
+                "  pipe:      \\\\.\\pipe\\{} (reachable)",
+                daemon::ipc::server::PIPE_NAME
+            );
+            true
+        }
+        Err(e) => {
+            println!(
+                "  pipe:      \\\\.\\pipe\\{} (unreachable: {e})",
+                daemon::ipc::server::PIPE_NAME
+            );
+            false
+        }
+    };
+    if daemon_up {
+        println!("  hotkey:    {} (registered)", cfg.hotkey.chord);
+    } else {
+        println!(
+            "  hotkey:    {} (not registered — daemon offline)",
+            cfg.hotkey.chord
+        );
+    }
+
     match install::autostart_enabled() {
         Ok(true) => println!("  autostart: enabled"),
         Ok(false) => println!("  autostart: disabled"),

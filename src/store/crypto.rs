@@ -62,6 +62,30 @@ impl Vault {
         })
     }
 
+    /// Step 13: read-only key validation for `clipd doctor`.
+    ///
+    /// `Vault::open` creates and persists a fresh key when the file is
+    /// missing — wrong shape for a diagnostic probe. `probe` only verifies
+    /// an existing file: read bytes, run DPAPI unwrap, check the unwrapped
+    /// length. Returns `Ok(unwrapped_len)` on success. Errors if the file
+    /// is missing, unreadable, fails DPAPI unwrap (wrong user / corrupted),
+    /// or has the wrong unwrapped length.
+    pub fn probe(key_path: &Path) -> Result<usize> {
+        if !key_path.exists() {
+            return Err(anyhow!("key file missing: {}", key_path.display()));
+        }
+        let wrapped = std::fs::read(key_path).context("reading key file")?;
+        let unwrapped =
+            unwrap_with_dpapi(&wrapped).context("unwrapping key with DPAPI")?;
+        if unwrapped.len() != KEY_BYTES {
+            return Err(anyhow!(
+                "key file has wrong length: expected {KEY_BYTES}, got {}",
+                unwrapped.len()
+            ));
+        }
+        Ok(unwrapped.len())
+    }
+
     /// Encrypt a payload. Returns `(nonce, ciphertext+tag)`.
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
         let mut nonce_bytes = [0u8; NONCE_BYTES];
@@ -215,5 +239,27 @@ mod tests {
         let (nonce, mut ct) = vault.encrypt(b"important").unwrap();
         ct[0] ^= 0xFF;
         assert!(vault.decrypt(&nonce, &ct).is_err());
+    }
+
+    // Step 13: probe is the read-only diagnostic the `clipd doctor`
+    // subcommand calls. Unlike `Vault::open`, it must NOT create the file.
+    #[test]
+    fn probe_missing_file_errors_without_creating_it() {
+        let dir = TempDir::new().unwrap();
+        let key_path = dir.path().join("missing.dpapi");
+        assert!(Vault::probe(&key_path).is_err());
+        assert!(
+            !key_path.exists(),
+            "probe must not create a key file when one is missing"
+        );
+    }
+
+    #[test]
+    fn probe_existing_key_returns_byte_count() {
+        let dir = TempDir::new().unwrap();
+        let key_path = dir.path().join("k.dpapi");
+        let _ = Vault::open(&key_path).unwrap();
+        let bytes = Vault::probe(&key_path).expect("probe should succeed for healthy key");
+        assert_eq!(bytes, KEY_BYTES);
     }
 }

@@ -352,11 +352,40 @@ Acceptance criteria are testable.
   exclude-app path: `excluded_app_basename_match_is_case_insensitive`,
   `skip_reason_returns_excluded_app_for_listed_exe`.
 
-### Step 13 — Polish
-- Tracing → file logger at `%APPDATA%\clipd\logs\clipd.log` with rotation.
-- Crash handler logs panic + backtrace.
-- `clipd doctor` subcommand: prints config, checks key file, DB integrity,
-  named pipe reachability, hotkey registration.
+### Step 13 — Polish ✅
+- Layered tracing subscriber: console (stderr) + daily-rotating file
+  appender at `%APPDATA%\clipd\logs\clipd.<YYYY-MM-DD>.log`,
+  `max_log_files(14)`. Synchronous writes (no `non_blocking`) because
+  release builds set `panic = "abort"` — a background flush thread
+  would race process termination at exactly the wrong moment. Logging
+  volume is one line per copy event, so blocking the message pump on
+  a file write is acceptable. Logs-dir creation failure surfaces to
+  stderr and falls back to console-only — never blocks startup.
+- Global panic hook (guarded by `std::sync::Once` so the picker
+  supervisor's relaunches don't chain hooks) emits a single
+  `tracing::error!` with thread name, panic location, message, and a
+  `Backtrace::force_capture()` trace, then defers to the previous hook
+  so default stderr printing still happens. `force_capture` ignores
+  `RUST_BACKTRACE` because the daemon usually runs without it.
+- `clipd doctor` expanded: `logs:` line points at the rotation dir;
+  `key:` calls a new `Vault::probe()` that reads + DPAPI-unwraps
+  without side-effecting a key file (vs. `Vault::open` which creates);
+  `db:` calls a new `store::integrity_check()` running
+  `PRAGMA integrity_check` over a read-only handle and printing `ok`
+  or the multi-line diagnostic; `pipe:` reports
+  `\\.\pipe\clipd reachable/unreachable` via the existing `Request::Ping`
+  round-trip; `hotkey:` derives `(registered)` from daemon-up because
+  `RegisterHotKey` failure aborts the daemon at startup, so a running
+  daemon proves the chord is bound.
+- New unit tests: `probe_missing_file_errors_without_creating_it`,
+  `probe_existing_key_returns_byte_count`,
+  `integrity_check_reports_ok_on_healthy_db`,
+  `integrity_check_reports_failure_on_corrupted_db`. 170 tests pass.
+- **Accept:** running `clipd --daemon` populates
+  `%APPDATA%\clipd\logs\clipd.<today>.log` with the startup INFO trace
+  (key generation, IPC up, hotkey registered, picker prewarm). Running
+  `clipd doctor` against a live daemon flips pipe → reachable and
+  hotkey → registered; against a stopped daemon flips them back.
 
 ### Step 14 — Release
 - GitHub Actions: Windows MSVC build, `cargo test`, signed release artifact.

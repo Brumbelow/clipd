@@ -119,6 +119,30 @@ fn open_ro(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Step 13: read-only integrity probe for `clipd doctor`. Runs SQLite's
+/// `PRAGMA integrity_check`, which scans every page for corruption and
+/// returns the literal string `"ok"` for a healthy DB or one or more
+/// descriptive error rows otherwise. Returns the joined first column of
+/// the result rows. Caller decides how to render — doctor compares
+/// against `"ok"` to colour the output.
+pub fn integrity_check(db_path: &Path) -> Result<String> {
+    let conn = open_ro(db_path)?;
+    let mut stmt = conn
+        .prepare("PRAGMA integrity_check")
+        .context("preparing integrity_check")?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .context("running integrity_check")?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.context("reading integrity_check row")?);
+    }
+    if out.is_empty() {
+        anyhow::bail!("integrity_check returned no rows");
+    }
+    Ok(out.join("\n"))
+}
+
 pub fn insert_or_bump(db_path: &Path, vault: &Vault, e: &NewEntry) -> Result<Outcome> {
     let mut conn = open_or_init(db_path, vault)?;
 
@@ -1528,5 +1552,35 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].preview, "old pinned needle");
         assert!(rows[0].pinned);
+    }
+
+    // Step 13: `clipd doctor` calls integrity_check. A healthy DB must
+    // return the literal string "ok"; a deliberately corrupted file must
+    // return something else (we don't pin the exact wording — sqlite's
+    // diagnostic strings vary by version).
+    #[test]
+    fn integrity_check_reports_ok_on_healthy_db() {
+        let f = fixture();
+        // Touching the DB with the production opener guarantees the v5
+        // schema is present; integrity_check on an empty-but-valid DB
+        // also returns "ok", so this exercises the typical path.
+        insert_at(&f, "hello", 1000);
+        let result = integrity_check(&f.db).unwrap();
+        assert_eq!(result, "ok");
+    }
+
+    #[test]
+    fn integrity_check_reports_failure_on_corrupted_db() {
+        let f = fixture();
+        insert_at(&f, "hello", 1000);
+        // Corrupt the DB by rewriting the file with garbage. SQLite's
+        // page-level checks fire on any byte not matching a page header.
+        std::fs::write(&f.db, b"not a sqlite database\x00\x00\x00\x00").unwrap();
+        // Either open fails (not a sqlite db) or the pragma returns a
+        // non-"ok" diagnostic — both count as a doctor red flag, which is
+        // what the caller renders.
+        if let Ok(s) = integrity_check(&f.db) {
+            assert_ne!(s, "ok");
+        }
     }
 }
