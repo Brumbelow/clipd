@@ -251,8 +251,30 @@ fn read_foreground_info() -> ForegroundInfo {
     }
 }
 
-/// Spawn `clipd pick` as a subprocess. Picker connects back over IPC.
+/// Step 11: trigger the picker UI. Prefers IPC `Show` to the prewarmed
+/// child, falls back to spawning a fresh `clipd pick` if the supervisor
+/// has disabled prewarm or the show send fails.
 fn launch_picker() -> Result<()> {
+    let prewarm_disabled = STATE
+        .get()
+        .map(|s| s.prewarm_disabled.load(std::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(true);
+
+    if !prewarm_disabled {
+        let t0 = std::time::Instant::now();
+        match crate::daemon::ipc::picker_pipe::send_show() {
+            Ok(()) => {
+                info!(
+                    "WM_HOTKEY -> picker show ack: {}ms",
+                    t0.elapsed().as_millis()
+                );
+                return Ok(());
+            }
+            Err(e) => warn!("picker show via pipe failed; falling back to spawn: {e:#}"),
+        }
+    }
+
+    // Fallback: legacy fresh-process spawn.
     let exe = std::env::current_exe().context("locating clipd.exe")?;
     std::process::Command::new(exe)
         .arg("pick")

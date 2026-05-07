@@ -40,7 +40,13 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Open the picker window. Talks to the running daemon.
-    Pick,
+    Pick {
+        /// Step 11: start hidden, listen on `\\.\pipe\clipd-picker`, and
+        /// re-show on Show requests instead of exiting on Esc/Enter.
+        /// The daemon launches the prewarmed instance at startup.
+        #[arg(long)]
+        prewarm: bool,
+    },
 
     /// Print recent clipboard entries.
     List {
@@ -94,7 +100,8 @@ fn main() -> Result<()> {
     }
 
     match cli.cmd {
-        Some(Cmd::Pick) | None => picker::run(cfg),
+        Some(Cmd::Pick { prewarm }) => picker::run(cfg, prewarm),
+        None => picker::run(cfg, false),
         Some(Cmd::List { limit }) => cli_list(&cfg, limit),
         Some(Cmd::Search { query, limit }) => cli_search(&cfg, &query, limit),
         Some(Cmd::Delete { id }) => cli_delete(&cfg, id),
