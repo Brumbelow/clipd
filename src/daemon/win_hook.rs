@@ -5,7 +5,6 @@
 use crate::daemon::{capture, DaemonState};
 use anyhow::{anyhow, bail, Context, Result};
 use once_cell::sync::OnceCell;
-use std::sync::mpsc::Sender;
 use tracing::{debug, error, info, warn};
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, BOOL, HANDLE, HWND, LPARAM, LRESULT, WPARAM};
@@ -31,7 +30,7 @@ const HOTKEY_ID: i32 = 0xC11D; // "clip d"
 /// Module-global state pointer. Set once at startup. The wnd_proc reads it.
 static STATE: OnceCell<DaemonState> = OnceCell::new();
 
-pub fn run(state: DaemonState, hwnd_tx: Option<Sender<isize>>) -> Result<()> {
+pub fn run(state: DaemonState) -> Result<()> {
     STATE
         .set(state.clone())
         .map_err(|_| anyhow!("daemon already running in this process"))?;
@@ -79,15 +78,6 @@ pub fn run(state: DaemonState, hwnd_tx: Option<Sender<isize>>) -> Result<()> {
     };
 
     info!("message-only window created: hwnd={:p}", hwnd.0);
-
-    // Step 11: tray thread is waiting on this hwnd to wire its Quit item.
-    // HWND.0 is *mut c_void (not Send); marshal as isize and rebuild on the
-    // far end.
-    if let Some(tx) = hwnd_tx {
-        if let Err(e) = tx.send(hwnd.0 as isize) {
-            warn!("could not deliver hwnd to tray: {e}");
-        }
-    }
 
     // Register clipboard format listener.
     // SAFETY: hwnd is a valid window handle owned by this thread.

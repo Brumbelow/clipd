@@ -8,7 +8,6 @@
 //!   - `clipboard_format` — Step 7: format enumeration + name/code helpers.
 //!   - `image`            — Step 8: DIB↔PNG conversion + thumbnail resize.
 //!   - `ipc`              — named-pipe server.
-//!   - `tray`             — Step 11: notification-area icon + menu.
 
 pub mod capture;
 pub mod clipboard;
@@ -16,7 +15,6 @@ pub mod clipboard_format;
 pub mod image;
 pub mod ipc;
 pub mod picker_supervisor;
-pub mod tray;
 pub mod win_hook;
 
 use crate::config::Config;
@@ -71,10 +69,6 @@ pub fn run(cfg: Config) -> Result<()> {
     let vault = Vault::open(&key_path).context("opening clipd vault (DPAPI key)")?;
     let state = DaemonState::new(Arc::new(cfg), Arc::new(vault));
     ipc::server::spawn(state.clone()).context("starting IPC server")?;
-    // Tray needs the daemon's message-only HWND for its Quit menu item.
-    // win_hook posts the HWND down this channel after CreateWindowExW.
-    let (hwnd_tx, hwnd_rx) = std::sync::mpsc::channel::<isize>();
-    tray::spawn(state.clone(), hwnd_rx).context("starting tray icon")?;
     // Step 11: prewarm the picker so WM_HOTKEY can re-show instead of
     // fork-execing a fresh process per press.
     if let Err(e) = picker_supervisor::spawn(state.clone()) {
@@ -82,7 +76,7 @@ pub fn run(cfg: Config) -> Result<()> {
         tracing::warn!("picker supervisor failed to start: {e:#}");
         state.prewarm_disabled.store(true, Ordering::SeqCst);
     }
-    let pump_result = win_hook::run(state.clone(), Some(hwnd_tx));
+    let pump_result = win_hook::run(state.clone());
     // Step 11: stop the supervisor and reap the picker child so it doesn't
     // outlive the daemon as an orphan.
     state.shutting_down.store(true, Ordering::SeqCst);
