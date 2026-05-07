@@ -2,7 +2,7 @@
 //!
 //! All Win32 calls are unsafe; SAFETY comments cover each block.
 
-use crate::daemon::{capture, DaemonState};
+use crate::daemon::{capture, tray, DaemonState};
 use anyhow::{anyhow, bail, Context, Result};
 use once_cell::sync::OnceCell;
 use tracing::{debug, error, info, warn};
@@ -92,6 +92,16 @@ pub fn run(state: DaemonState) -> Result<()> {
         .with_context(|| format!("RegisterHotKey ({})", state.cfg.hotkey.chord))?;
     info!("hotkey registered: {}", state.cfg.hotkey.chord);
 
+    // Step 11: install the tray icon. Lives on this same thread and routes
+    // mouse events through wnd_proc as TRAY_CALLBACK_MSG.
+    let tray_handle = match tray::install(hwnd, state.clone()) {
+        Ok(h) => Some(h),
+        Err(e) => {
+            warn!("tray install failed; daemon continues headless: {e:#}");
+            None
+        }
+    };
+
     // Message pump.
     let mut msg = MSG::default();
     loop {
@@ -113,6 +123,9 @@ pub fn run(state: DaemonState) -> Result<()> {
     }
 
     // Cleanup.
+    if let Some(h) = tray_handle.as_ref() {
+        tray::uninstall(h);
+    }
     // SAFETY: hwnd still valid; ids match the registrations above.
     unsafe {
         let _ = RemoveClipboardFormatListener(hwnd);
@@ -154,6 +167,12 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             // SAFETY: PostQuitMessage signals the message pump to exit.
             unsafe { PostQuitMessage(0) };
+            LRESULT(0)
+        }
+        m if m == tray::TRAY_CALLBACK_MSG => {
+            if let Some(state) = STATE.get() {
+                tray::handle_callback(hwnd, lparam, state);
+            }
             LRESULT(0)
         }
         // SAFETY: DefWindowProcW is the documented fallback for unhandled messages.

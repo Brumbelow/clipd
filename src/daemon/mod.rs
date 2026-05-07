@@ -8,6 +8,8 @@
 //!   - `clipboard_format` — Step 7: format enumeration + name/code helpers.
 //!   - `image`            — Step 8: DIB↔PNG conversion + thumbnail resize.
 //!   - `ipc`              — named-pipe server.
+//!   - `tray`             — Step 11: notification-area icon + popup menu
+//!     (native Shell_NotifyIconW; runs inside wnd_proc on the main thread).
 
 pub mod capture;
 pub mod clipboard;
@@ -15,6 +17,7 @@ pub mod clipboard_format;
 pub mod image;
 pub mod ipc;
 pub mod picker_supervisor;
+pub mod tray;
 pub mod win_hook;
 
 use crate::config::Config;
