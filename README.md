@@ -44,7 +44,7 @@ To remove autostart: `.\clipd.exe uninstall`.
 
 ### First-run SmartScreen warning
 
-`clipd.exe` is signed by Andrew Brumbelow via Microsoft Trusted Signing.
+`clipd.exe` is signed by via Microsoft Trusted Signing.
 SmartScreen also weighs application reputation, which builds with download
 volume; until reputation accumulates, the first time you run the binary
 you may still see "Windows protected your PC."
