@@ -75,13 +75,12 @@ pub fn run(cfg: Config) -> Result<()> {
     // Nightly retention purge. Detached thread; observes
     // `state.shutting_down` to exit cleanly with the daemon.
     let _ = purge::spawn(state.clone());
-    // Prewarm the picker so WM_HOTKEY can re-show instead of
-    // fork-execing a fresh process per press.
-    if let Err(e) = picker_supervisor::spawn(state.clone()) {
-        // Non-fatal: the WM_HOTKEY handler falls back to legacy spawn.
-        tracing::warn!("picker supervisor failed to start: {e:#}");
-        state.prewarm_disabled.store(true, Ordering::SeqCst);
-    }
+    // Prewarm is disabled: a hidden eframe window stops servicing
+    // `Visible(true)` viewport commands after one hide cycle on Windows,
+    // so subsequent hotkey presses never resurfaced the picker. WM_HOTKEY
+    // cold-spawns `clipd pick` per press instead — slower (~150–400ms
+    // each) but reliable.
+    state.prewarm_disabled.store(true, Ordering::SeqCst);
     let pump_result = win_hook::run(state.clone());
     // Stop the supervisor and reap the picker child so it doesn't
     // outlive the daemon as an orphan.

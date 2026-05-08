@@ -1,7 +1,13 @@
 //! Spawn + monitor the prewarmed picker.
 //!
-//! The daemon launches one `clipd pick --prewarm` child at startup. The
-//! supervisor thread:
+//! Prewarm is currently disabled at the call site in `daemon::run` because
+//! a hidden eframe window stops servicing `Visible(true)` viewport
+//! commands after one hide cycle on Windows. The infrastructure is kept
+//! in place for a future fix; `#![allow(dead_code)]` silences the
+//! unused-symbol warnings until then.
+//!
+//! When enabled, the daemon launches one `clipd pick --prewarm` child at
+//! startup. The supervisor thread:
 //!
 //!   1. Records the child's PID on `DaemonState.picker_pid`.
 //!   2. Forwards the child's stderr into `tracing::warn!` (so panics from
@@ -15,6 +21,8 @@
 //! the message pump exits causes the supervisor to kill the child and
 //! return. `daemon::run` also calls [`kill_pid`] on the recorded PID as
 //! a belt-and-braces against orphaning.
+
+#![allow(dead_code)]
 
 use crate::daemon::DaemonState;
 use anyhow::{Context, Result};

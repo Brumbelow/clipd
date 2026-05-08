@@ -1,6 +1,6 @@
 [package]
 name = "clipd"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Andrew Brumbelow"]
 description = "Local-first clipboard history manager for Windows 11"
