@@ -62,7 +62,7 @@ impl Vault {
         })
     }
 
-    /// Step 13: read-only key validation for `clipd doctor`.
+    /// Read-only key validation for `clipd doctor`.
     ///
     /// `Vault::open` creates and persists a fresh key when the file is
     /// missing — wrong shape for a diagnostic probe. `probe` only verifies
@@ -241,8 +241,8 @@ mod tests {
         assert!(vault.decrypt(&nonce, &ct).is_err());
     }
 
-    // Step 13: probe is the read-only diagnostic the `clipd doctor`
-    // subcommand calls. Unlike `Vault::open`, it must NOT create the file.
+    // probe is the read-only diagnostic the `clipd doctor` subcommand
+    // calls. Unlike `Vault::open`, it must NOT create the file.
     #[test]
     fn probe_missing_file_errors_without_creating_it() {
         let dir = TempDir::new().unwrap();

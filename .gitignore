@@ -23,3 +23,11 @@ Thumbs.db
 **/entries.db
 **/entries.db-*
 **/key.dpapi
+
+# Code-signing local state — Azure Trusted Signing config + any PFX/cert
+signing/
+*.pfx
+
+# Release packaging artifacts (staging dir + zip produced by manual release flow)
+clipd-v*-x86_64-pc-windows-msvc/
+clipd-v*-x86_64-pc-windows-msvc.zip

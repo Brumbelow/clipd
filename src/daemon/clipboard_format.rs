@@ -1,4 +1,4 @@
-//! Step 7: clipboard-format enumeration + name/code lookup.
+//! Clipboard-format enumeration + name/code lookup.
 //!
 //! Surface:
 //!   - [`FormatPayload`] — `(name, bytes)` pair captured from one clipboard format.
@@ -12,9 +12,9 @@
 //!     resolved at promote time via [`clipboard_win::raw::register_format`]
 //!     because the numeric code is allocated dynamically per Windows session.
 //!
-//! Step 7 captures text + rich-text only. CF_DIB / CF_BITMAP / CF_DIBV5 are
-//! reserved for Step 8 (image support); CF_HDROP is reserved for a future
-//! "kind=files" step that needs a paste-target UX.
+//! Text + rich-text formats are captured here. CF_DIB / CF_BITMAP /
+//! CF_DIBV5 are handled separately on the image path; CF_HDROP is
+//! reserved for a future "kind=files" step that needs a paste-target UX.
 
 use clipboard_win::raw;
 
@@ -36,9 +36,9 @@ const SIZE_CAP_TOTAL: usize = 16 * 1024 * 1024; // 16 MiB
 
 /// Capture this format on copy?
 ///
-/// Allow-list (not deny-list) — keeps Step 7's blast radius tight. CF_DIB /
-/// CF_BITMAP / CF_DIBV5 belong to Step 8; CF_HDROP needs a "where do these
-/// files paste to" UX that doesn't exist yet.
+/// Allow-list (not deny-list) — keeps the blast radius tight. CF_DIB /
+/// CF_BITMAP / CF_DIBV5 are handled on the image path; CF_HDROP needs a
+/// "where do these files paste to" UX that doesn't exist yet.
 pub fn is_allowed(name: &str) -> bool {
     matches!(
         name,
@@ -101,7 +101,7 @@ pub fn name_for_code(code: u32) -> Option<String> {
 }
 
 /// `clipd:`-prefixed `entry_formats` names are clipd-internal derived data
-/// (Step 8 PNG thumbnails / full-size encodes; future OCR text, etc.) — not
+/// (PNG thumbnails / full-size encodes; future OCR text, etc.) — not
 /// Win32 clipboard formats. Promote loops must skip these so we don't
 /// register garbage format names with the OS clipboard.
 pub fn is_clipd_internal(name: &str) -> bool {
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn allow_list_rejects_image_and_files_and_unknown() {
-        // Image kinds belong to Step 8.
+        // Image kinds are handled on the image path, not here.
         assert!(!is_allowed("CF_DIB"));
         assert!(!is_allowed("CF_DIBV5"));
         assert!(!is_allowed("CF_BITMAP"));

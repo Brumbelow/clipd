@@ -1,28 +1,25 @@
 //! Schema migrations. Versioned via SQLite's `user_version` pragma.
 //!
-//! v1 (Step 2): base `entries` table + dedup/last_seen indexes.
-//! v2 (Step 4): encrypt any plaintext `content` left over from v1 with the
-//!   process Vault and stamp a fresh nonce. The schema itself does not change;
-//!   only values do.
-//! v3 (Step 7): per-format encrypted payloads in `entry_formats` child
-//!   table. The unused `formats TEXT` column on `entries` stays in place —
-//!   `DROP COLUMN`'s risk isn't worth it pre-v0.1, and queries ignore it.
-//! v4 (Step 9): `idx_created` index over `entries.created_at DESC`. Lets the
+//! v1: base `entries` table + dedup/last_seen indexes.
+//! v2: encrypt any plaintext `content` left over from v1 with the process
+//!   Vault and stamp a fresh nonce. The schema itself does not change; only
+//!   values do.
+//! v3: per-format encrypted payloads in `entry_formats` child table. The
+//!   unused `formats TEXT` column on `entries` stays in place — `DROP
+//!   COLUMN`'s risk isn't worth it, and queries ignore it.
+//! v4: `idx_created` index over `entries.created_at DESC`. Lets the
 //!   `:today`/`:7d`/`>YYYY-MM-DD` predicates short-circuit the LIKE scan on
 //!   anything but the smallest databases.
-//! v5 (Step 10): `content_kind` column for the content-shape taxonomy
+//! v5: `content_kind` column for the content-shape taxonomy
 //!   (`url|json|hex|base64|code|text`). DDL adds the column with default
 //!   `'text'`; the data step decrypts every existing text row and stamps
-//!   the classifier's verdict so pre-Step-10 rows badge correctly without
-//!   waiting on a re-capture.
+//!   the classifier's verdict so older rows badge correctly without waiting
+//!   on a re-capture.
 //!
 //! Migrations are version-anchored, not index-anchored, because v2 is a
 //! data-only step that needs the [`Vault`] — interleaving DDL and data
 //! across versions cleanly requires walking the version list explicitly
 //! rather than using a slice index.
-//!
-//! Deferred to later steps:
-//!   - FTS5 virtual table (post-v0.1; LIKE is adequate up to ~10k rows)
 
 use crate::store::crypto::Vault;
 use anyhow::Result;
@@ -108,7 +105,7 @@ pub fn run_all(conn: &mut Connection, vault: &Vault) -> Result<()> {
     Ok(())
 }
 
-/// Step 10 data migration: walk every `kind == 'text'` row, decrypt the
+/// v5 data migration: walk every `kind == 'text'` row, decrypt the
 /// canonical content with the [`Vault`], run the content-shape classifier,
 /// and stamp `content_kind`. Image/files rows keep the column default
 /// (`'text'`) — the picker badge logic ignores `content_kind` for non-text
@@ -148,7 +145,7 @@ fn backfill_content_kind(conn: &mut Connection, vault: &Vault) -> Result<()> {
     Ok(())
 }
 
-/// Step 4 data migration: encrypt any plaintext rows left from a v1 DB.
+/// v2 data migration: encrypt any plaintext rows left from a v1 DB.
 /// Caller is `run_all`; not exposed because correctness depends on running
 /// inside the version-walk.
 fn encrypt_v1_plaintext(conn: &mut Connection, vault: &Vault) -> Result<()> {

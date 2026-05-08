@@ -1,10 +1,10 @@
-//! Step 5 named-pipe IPC server.
+//! Named-pipe IPC server.
 //!
 //! Synchronous design: one accept-loop thread, one OS thread per inbound
 //! connection. Each connection is a single request/response: read one
 //! newline-terminated JSON [`Request`], write one newline-terminated JSON
-//! [`Response`], close. This matches the `nc`-style acceptance criterion in
-//! `clipd-plan.md` and the picker's "open, query, close" flow in Step 6.
+//! [`Response`], close. The picker uses an "open, query, close" flow
+//! per request.
 //!
 //! No graceful shutdown: the daemon exits via `WM_QUIT` on the main thread
 //! and the OS reaps the listener / connection threads.
@@ -143,9 +143,9 @@ fn dispatch(req: Request, state: &DaemonState) -> Response {
     }
 }
 
-/// Step 8: image promote. The canonical CF_DIB lives in `entries.content`;
-/// the picker has already shown the user a thumbnail, so this just hands
-/// the original bytes back to the OS clipboard.
+/// Image promote. The canonical CF_DIB lives in `entries.content`; the
+/// picker has already shown the user a thumbnail, so this just hands the
+/// original bytes back to the OS clipboard.
 fn promote_image(dib: &[u8]) -> Response {
     match clipboard::set_image(dib) {
         Ok(()) => Response::Ok,
@@ -154,17 +154,16 @@ fn promote_image(dib: &[u8]) -> Response {
 }
 
 fn promote(kind: &str, plaintext: &[u8], formats: &[FormatPayload]) -> Response {
-    // Step 7: row carries the full format set captured at copy time.
-    // Replay them all so the receiver picks the highest-fidelity payload
-    // it understands.
+    // Row carries the full format set captured at copy time. Replay them
+    // all so the receiver picks the highest-fidelity payload it understands.
     if !formats.is_empty() {
         return match clipboard::set_all_formats(formats) {
             Ok(()) => Response::Ok,
             Err(e) => Response::Error(format!("{e:#}")),
         };
     }
-    // Fallback: pre-Step-7 row with no captured formats. Text-only
-    // restore via CF_UNICODETEXT.
+    // Fallback: legacy row with no captured formats. Text-only restore
+    // via CF_UNICODETEXT.
     if kind != "text" {
         return Response::Error(format!("entry kind={kind} has no captured formats"));
     }
@@ -293,7 +292,7 @@ mod tests {
 
     #[test]
     fn search_with_date_filter_narrows_to_window() {
-        // Step 9: `:7d kubectl` shape — text + a single After filter.
+        // `:7d kubectl` shape — text + a single After filter.
         let f = fixture();
         insert_text(&f.state, "old kubectl", 1_000_000);
         insert_text(&f.state, "new kubectl", 9_000_000);
@@ -396,10 +395,10 @@ mod tests {
 
     #[test]
     fn promote_non_text_non_image_with_no_formats_returns_error() {
-        // Step 7 replaced the placeholder error with a real check: a row
-        // with no captured formats and a non-text, non-image kind has
-        // nothing to restore. Use kind="files" so the dispatch doesn't
-        // route to the image path (which would touch the real clipboard).
+        // A row with no captured formats and a non-text, non-image kind
+        // has nothing to restore. Use kind="files" so the dispatch
+        // doesn't route to the image path (which would touch the real
+        // clipboard).
         let f = fixture();
         let h = blake3::hash(b"unknown-bytes");
         let outcome = store::insert_or_bump(
@@ -509,7 +508,7 @@ mod tests {
     // Note: success paths for Promote (text fallback, multi-format,
     // image) are intentionally not unit-tested — they touch the real
     // Windows clipboard, which races with other processes during CI.
-    // Live verification covers the round-trip per Step 7/8 criteria.
+    // Live verification covers the round-trip.
 
     #[test]
     fn bad_json_keeps_listener_alive() {

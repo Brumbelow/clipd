@@ -1,4 +1,4 @@
-//! Content-shape auto-classifier (Step 10).
+//! Content-shape auto-classifier.
 //!
 //! Distinct from `kind` (capture-format taxonomy: text/image/files), this
 //! returns one of `url|json|hex|base64|code|text` based on the *shape* of

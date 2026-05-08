@@ -1,15 +1,15 @@
 //! Clipboard write path.
 //!
-//! Step 5: text-only via [`set_text`] (kept as fallback for pre-Step-7 rows
-//!         whose `entry_formats` table is empty).
-//! Step 7: multi-format via [`set_all_formats`] — opens the clipboard,
-//!         empties it, then loops `SetClipboardData` over every captured
-//!         format. Standard CF_* codes resolve via
-//!         [`clipboard_format::standard_code`]; registered names re-resolve
-//!         to a session-local code via [`raw::register_format`].
-//! Step 8: image via [`set_image`] — places the canonical CF_DIB bytes,
-//!         then best-effort wraps them into BMP-file format and registers
-//!         CF_BITMAP for legacy GDI receivers (Paint, older Office).
+//! [`set_text`] — text-only, kept as fallback for legacy rows whose
+//!     `entry_formats` table is empty.
+//! [`set_all_formats`] — multi-format: opens the clipboard, empties it,
+//!     then loops `SetClipboardData` over every captured format. Standard
+//!     CF_* codes resolve via [`clipboard_format::standard_code`];
+//!     registered names re-resolve to a session-local code via
+//!     [`raw::register_format`].
+//! [`set_image`] — places the canonical CF_DIB bytes, then best-effort
+//!     wraps them into BMP-file format and registers CF_BITMAP for legacy
+//!     GDI receivers (Paint, older Office).
 
 use crate::daemon::clipboard_format::{self, FormatPayload};
 use crate::daemon::image as clipd_image;
@@ -24,7 +24,7 @@ pub fn set_text(s: &str) -> Result<()> {
 ///
 /// Per-format failures are logged at `warn!` and skipped — one bad format
 /// shouldn't take down the whole paste. `clipd:`-prefixed names are
-/// internal derived data (Step 8 PNG thumbnails) and are skipped silently.
+/// internal derived data (PNG thumbnails) and are skipped silently.
 /// Returns `Err` only if zero formats were placed (clipboard would be left
 /// empty, which is worse than the pre-promote state).
 pub fn set_all_formats(formats: &[FormatPayload]) -> Result<()> {
@@ -67,7 +67,7 @@ pub fn set_all_formats(formats: &[FormatPayload]) -> Result<()> {
     Ok(())
 }
 
-/// Step 8: place a CF_DIB payload on the clipboard, plus a best-effort
+/// Place a CF_DIB payload on the clipboard, plus a best-effort
 /// reconstructed CF_BITMAP for receivers that prefer the GDI handle (Paint,
 /// some legacy Office paths). The DIB write is the load-bearing one — Paint
 /// accepts CF_DIB directly and `Ctrl+V` will work even if the CF_BITMAP

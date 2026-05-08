@@ -1,4 +1,4 @@
-//! Step 11: spawn + monitor the prewarmed picker.
+//! Spawn + monitor the prewarmed picker.
 //!
 //! The daemon launches one `clipd pick --prewarm` child at startup. The
 //! supervisor thread:

@@ -43,9 +43,9 @@ struct Cli {
 enum Cmd {
     /// Open the picker window. Talks to the running daemon.
     Pick {
-        /// Step 11: start hidden, listen on `\\.\pipe\clipd-picker`, and
-        /// re-show on Show requests instead of exiting on Esc/Enter.
-        /// The daemon launches the prewarmed instance at startup.
+        /// Start hidden, listen on `\\.\pipe\clipd-picker`, and re-show on
+        /// Show requests instead of exiting on Esc/Enter. The daemon
+        /// launches the prewarmed instance at startup.
         #[arg(long)]
         prewarm: bool,
     },
@@ -103,10 +103,10 @@ enum Cmd {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    // Step 13: load config before init_tracing so the file logger can
-    // write inside the resolved data dir (`%APPDATA%\clipd\logs\`). The
-    // tiny window before init_tracing — clap parse + one TOML read —
-    // can't emit tracing events anyway, so reordering loses nothing.
+    // Load config before init_tracing so the file logger can write inside
+    // the resolved data dir (`%APPDATA%\clipd\logs\`). The tiny window
+    // before init_tracing — clap parse + one TOML read — can't emit
+    // tracing events anyway, so reordering loses nothing.
     let cfg = config::Config::load_or_default(cli.config.as_deref()).context("loading config")?;
     init_tracing(&cfg)?;
 
@@ -131,8 +131,8 @@ fn main() -> Result<()> {
 }
 
 fn init_tracing(cfg: &config::Config) -> Result<()> {
-    // Step 13: layered subscriber — console (stderr, default) plus a
-    // daily-rotating file appender at `%APPDATA%\clipd\logs\clipd.log.<date>`.
+    // Layered subscriber — console (stderr, default) plus a daily-rotating
+    // file appender at `%APPDATA%\clipd\logs\clipd.log.<date>`.
     //
     // Synchronous writes (no `tracing_appender::non_blocking`) are
     // deliberate: release builds set `panic = "abort"` in Cargo.toml, which
@@ -181,11 +181,11 @@ fn build_file_appender(
         .context("building rolling file appender")
 }
 
-/// Step 13: panic hook that logs the message, source location, thread name,
-/// and a forced backtrace via `tracing::error!` so it lands in both the
-/// console and file subscribers. Guarded by `Once` because the picker
-/// supervisor relaunches `clipd pick --prewarm` and tests re-init the
-/// process; double-installing would chain hooks and double-log.
+/// Panic hook that logs the message, source location, thread name, and a
+/// forced backtrace via `tracing::error!` so it lands in both the console
+/// and file subscribers. Guarded by `Once` because the picker supervisor
+/// relaunches `clipd pick --prewarm` and tests re-init the process;
+/// double-installing would chain hooks and double-log.
 fn install_panic_hook() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
@@ -295,8 +295,8 @@ fn cli_doctor(cfg: &config::Config) -> Result<()> {
     println!("  excluded:  {} app(s)", cfg.capture.excluded_apps.len());
     println!("  sensitive: policy={:?}", cfg.capture.sensitive_policy);
 
-    // Step 13: key file probe. `Vault::probe` reads + DPAPI-unwraps without
-    // creating the file (`Vault::open` would side-effect a fresh key).
+    // Key file probe. `Vault::probe` reads + DPAPI-unwraps without creating
+    // the file (`Vault::open` would side-effect a fresh key).
     let key_path = cfg.key_full_path();
     if !key_path.exists() {
         println!(
@@ -317,9 +317,9 @@ fn cli_doctor(cfg: &config::Config) -> Result<()> {
         }
     }
 
-    // Step 13: DB integrity probe. PRAGMA integrity_check returns "ok" on
-    // a healthy file; anything else is a red flag (truncation, page
-    // corruption, missing tables, etc.).
+    // DB integrity probe. PRAGMA integrity_check returns "ok" on a healthy
+    // file; anything else is a red flag (truncation, page corruption,
+    // missing tables, etc.).
     let db_path = cfg.db_full_path();
     if !db_path.exists() {
         println!("  db:        {} (not yet created)", db_path.display());
@@ -338,8 +338,8 @@ fn cli_doctor(cfg: &config::Config) -> Result<()> {
         }
     }
 
-    // Step 13: pipe reachability + derived hotkey-registration status. The
-    // daemon bails on RegisterHotKey failure (src/daemon/win_hook.rs), so a
+    // Pipe reachability + derived hotkey-registration status. The daemon
+    // bails on RegisterHotKey failure (src/daemon/win_hook.rs), so a
     // running daemon proves the chord is bound to its message-only window.
     let daemon_up = match daemon::ipc::client::send(cfg, daemon::ipc::Request::Ping) {
         Ok(_) => {

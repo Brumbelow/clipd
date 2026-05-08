@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn youtube_style_url_passes_entropy_check() {
         // 50-char YouTube URL — high-entropy slug, but a URL not a credential.
-        // Regression for a live false-positive observed during Step 3 hardening.
+        // Regression for a live false-positive observed during secrets hardening.
         let text = "https://www.youtube.com/watch?v=dQw4w9WgXcQ&t=42s";
         assert!(matches!(
             classify(text, None, None, false, &cfg()),

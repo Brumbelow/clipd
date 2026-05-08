@@ -1,4 +1,4 @@
-//! Step 11: separate named pipe for daemon → picker messages.
+//! Separate named pipe for daemon → picker messages.
 //!
 //! Direction is the inverse of the existing `clipd` pipe (where the daemon
 //! is the listener and CLI/picker are clients): here the *picker* listens at

@@ -18,12 +18,9 @@
 //! The `now` argument is taken as a parameter to keep tests deterministic;
 //! production callers pass `chrono::Local::now()`.
 //!
-//! Step 9. Parser is intentionally lenient — typos in dates fall through to
-//! free text rather than surfacing an error, matching the inline-filter UX
-//! of every other tool on the planet.
-//!
-//! Acceptance: `:7d kubectl` returns only entries with "kubectl" in the
-//! last 7 days.
+//! Parser is intentionally lenient — typos in dates fall through to free
+//! text rather than surfacing an error, matching the inline-filter UX of
+//! every other tool on the planet.
 
 use crate::store::DateFilter;
 use chrono::{DateTime, Local, NaiveDate, TimeZone};

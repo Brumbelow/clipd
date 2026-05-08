@@ -1,4 +1,4 @@
-//! Step 11: notification-area tray icon for the daemon (Win32-native).
+//! Notification-area tray icon for the daemon (Win32-native).
 //!
 //! Built on `Shell_NotifyIconW` + a `TrackPopupMenu` popup. No third-party
 //! crate — the previous `tray-icon` 0.23 implementation was reverted because

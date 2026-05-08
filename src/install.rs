@@ -1,11 +1,11 @@
-//! Step 11: autostart registry shim.
+//! Autostart registry shim.
 //!
 //! `clipd install --autostart` writes
 //! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\clipd` =
 //! `"<exe>" --daemon` (REG_SZ). `clipd uninstall` deletes the value.
 //!
 //! Unsafe Win32 surface is contained here; each block carries a
-//! `// SAFETY:` comment per AGENTS.md.
+//! `// SAFETY:` comment.
 
 use anyhow::{Context, Result};
 use windows::core::{PCWSTR, PWSTR};

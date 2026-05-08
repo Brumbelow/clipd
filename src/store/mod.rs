@@ -4,14 +4,12 @@
 //!   - `insert_or_bump` — write path with blake3 dedup. Encrypts `content`
 //!     with the process [`Vault`] before insert.
 //!   - `list`           — read path for `clipd list`. Does not touch
-//!     ciphertext — only `preview`, which is plaintext by design (Step 9
-//!     FTS5 indexes it).
+//!     ciphertext — only `preview`, which is plaintext by design.
 //!   - `open_or_init`   — connect, run schema migrations, run the v2
 //!     encryption sweep against any plaintext rows left from v1 DBs.
 //!
 //! WAL journal mode lets the daemon's writer coexist with read-only handles
-//! opened by short-lived `clipd list` invocations. Step 5 will replace the
-//! direct-DB read path with named-pipe IPC.
+//! opened by short-lived `clipd list` invocations.
 
 pub mod crypto;
 mod schema;
@@ -24,10 +22,10 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Step 9: a date predicate applied to `entries.created_at` before the
-/// text search runs. Bounds are unix-milliseconds. Constructed by
-/// `picker::query::parse` from `:today`-style tokens, serialized over IPC,
-/// and consumed by [`search`] as `WHERE created_at` clauses.
+/// A date predicate applied to `entries.created_at` before the text search
+/// runs. Bounds are unix-milliseconds. Constructed by `picker::query::parse`
+/// from `:today`-style tokens, serialized over IPC, and consumed by
+/// [`search`] as `WHERE created_at` clauses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DateFilter {
     /// `created_at >= ts`
@@ -40,9 +38,9 @@ pub enum DateFilter {
 
 pub struct NewEntry<'a> {
     pub kind: &'a str,
-    /// Step 10: content-shape kind (`url|json|hex|base64|code|text`).
-    /// Pass `"text"` for image/files captures — picker badge logic falls
-    /// back to `kind` when content_kind isn't meaningful.
+    /// Content-shape kind (`url|json|hex|base64|code|text`). Pass `"text"`
+    /// for image/files captures — picker badge logic falls back to `kind`
+    /// when content_kind isn't meaningful.
     pub content_kind: &'a str,
     pub content: &'a [u8],
     pub hash: &'a [u8],
@@ -50,11 +48,11 @@ pub struct NewEntry<'a> {
     pub created_at: i64,
     pub preview: String,
     pub source_app: Option<String>,
-    /// Step 7: every clipboard format captured at copy time, in
-    /// EnumClipboardFormats order. Empty slice = text-only legacy capture
-    /// or pre-Step-7 row; promote falls back to the `set_text` path.
+    /// Every clipboard format captured at copy time, in EnumClipboardFormats
+    /// order. Empty slice = text-only legacy capture; promote falls back to
+    /// the `set_text` path.
     pub formats: &'a [FormatPayload],
-    /// Step 12: when `sensitive_policy = "mark"`, the secrets layer routes
+    /// When `sensitive_policy = "mark"`, the secrets layer routes
     /// detected-secret captures here with `sensitive = true` instead of
     /// dropping them. Hidden from default `list`/`search` queries.
     pub sensitive: bool,
@@ -70,19 +68,19 @@ pub struct EntryRow {
     pub created_at: i64,
     pub last_seen: i64,
     pub kind: String,
-    /// Step 10: content-shape kind. See `crate::classify::ContentKind`.
+    /// Content-shape kind. See `crate::classify::ContentKind`.
     pub content_kind: String,
     pub preview: String,
     pub pinned: bool,
-    // size_bytes: surfaced for Step 12 (retention purge) and Step 13 (doctor stats).
+    // size_bytes: surfaced for retention purge and doctor stats.
     #[allow(dead_code)]
     pub size_bytes: i64,
 }
 
 /// Result of [`get_decrypted`]: row metadata + canonical decrypted text +
-/// every per-format payload captured at copy time (Step 7). `formats` is
-/// empty for pre-Step-7 rows, in which case the IPC promote handler falls
-/// back to the text-only `set_text` path.
+/// every per-format payload captured at copy time. `formats` is empty for
+/// text-only legacy rows, in which case the IPC promote handler falls back
+/// to the text-only `set_text` path.
 pub struct DecryptedEntry {
     pub row: EntryRow,
     pub plaintext: Vec<u8>,
@@ -119,7 +117,7 @@ fn open_ro(db_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Step 13: read-only integrity probe for `clipd doctor`. Runs SQLite's
+/// Read-only integrity probe for `clipd doctor`. Runs SQLite's
 /// `PRAGMA integrity_check`, which scans every page for corruption and
 /// returns the literal string `"ok"` for a healthy DB or one or more
 /// descriptive error rows otherwise. Returns the joined first column of
@@ -146,11 +144,10 @@ pub fn integrity_check(db_path: &Path) -> Result<String> {
 pub fn insert_or_bump(db_path: &Path, vault: &Vault, e: &NewEntry) -> Result<Outcome> {
     let mut conn = open_or_init(db_path, vault)?;
 
-    // Dedup is hash-on-canonical-text only (Step 2 design). If the same
-    // text shows up later with a richer format set (e.g. first from
-    // Notepad, then from Excel with HTML+RTF+Biff12), the existing row's
-    // formats are kept. Re-capturing formats per dedup hit would be a
-    // separate UX decision.
+    // Dedup is hash-on-canonical-text only. If the same text shows up
+    // later with a richer format set (e.g. first from Notepad, then from
+    // Excel with HTML+RTF+Biff12), the existing row's formats are kept.
+    // Re-capturing formats per dedup hit would be a separate UX decision.
     let bumped = conn
         .execute(
             "UPDATE entries SET last_seen = ?1 WHERE hash = ?2",
@@ -192,9 +189,9 @@ pub fn insert_or_bump(db_path: &Path, vault: &Vault, e: &NewEntry) -> Result<Out
     .context("INSERT entries")?;
     let id = tx.last_insert_rowid();
 
-    // Step 7: per-format encrypted child rows. Each format gets a fresh
-    // AES-GCM nonce — `Vault::encrypt` generates a fresh random nonce per
-    // call, so reuse-across-formats is impossible.
+    // Per-format encrypted child rows. Each format gets a fresh AES-GCM
+    // nonce — `Vault::encrypt` generates a fresh random nonce per call,
+    // so reuse-across-formats is impossible.
     {
         let mut stmt = tx
             .prepare(
@@ -250,9 +247,9 @@ pub fn list(db_path: &Path, limit: usize) -> Result<Vec<EntryRow>> {
         .context("collecting list rows")
 }
 
-/// Substring search over `preview` for Step 5 IPC. Step 9 layered on the
-/// `DateFilter` predicates and pinned-first ordering; the text matcher
-/// itself is still a `LIKE` scan (FTS5 deferred — adequate up to ~10k rows).
+/// Substring search over `preview` for IPC consumers. `DateFilter`
+/// predicates apply first; results are pinned-first then last-seen DESC.
+/// The text matcher is a `LIKE` scan — adequate up to ~10k rows.
 /// Previews are stored lowercased ([`derive_preview`]), so the needle is
 /// lowercased before binding to keep the match case-insensitive.
 ///
@@ -322,10 +319,10 @@ pub fn search(
 
 /// Fetch a single entry by id, returning the row metadata, its decrypted
 /// canonical text content, and every per-format payload captured at copy
-/// time (Step 7). Used by the IPC `Promote` handler.
+/// time. Used by the IPC `Promote` handler.
 ///
-/// The `formats` vector is empty for pre-Step-7 rows; the IPC handler
-/// falls back to the text-only `set_text` path in that case.
+/// The `formats` vector is empty for text-only legacy rows; the IPC
+/// handler falls back to the text-only `set_text` path in that case.
 pub fn get_decrypted(db_path: &Path, vault: &Vault, id: i64) -> Result<Option<DecryptedEntry>> {
     if !db_path.exists() {
         return Ok(None);
@@ -411,9 +408,9 @@ pub fn delete(db_path: &Path, vault: &Vault, id: i64) -> Result<bool> {
     Ok(n > 0)
 }
 
-/// Step 8: fetch and decrypt the `clipd:png_thumb` payload for an entry,
-/// if any. Returns `Ok(None)` for entries that have no thumbnail (text
-/// rows, images whose DIB couldn't be decoded for thumbnail generation).
+/// Fetch and decrypt the `clipd:png_thumb` payload for an entry, if any.
+/// Returns `Ok(None)` for entries that have no thumbnail (text rows,
+/// images whose DIB couldn't be decoded for thumbnail generation).
 pub fn get_thumbnail(db_path: &Path, vault: &Vault, id: i64) -> Result<Option<Vec<u8>>> {
     if !db_path.exists() {
         return Ok(None);
@@ -440,14 +437,14 @@ pub fn get_thumbnail(db_path: &Path, vault: &Vault, id: i64) -> Result<Option<Ve
     }
 }
 
-/// Step 12: rows removed by [`purge`].
+/// Rows removed by [`purge`].
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PurgeStats {
     pub by_age: usize,
     pub by_cap: usize,
 }
 
-/// Step 12: drop unpinned entries past the retention window or beyond the
+/// Drop unpinned entries past the retention window or beyond the
 /// configured cap. `now_ms` is parameterized so tests can pass a synthetic
 /// clock — production callers pass `chrono::Utc::now().timestamp_millis()`.
 ///
@@ -523,9 +520,8 @@ pub fn set_pinned(db_path: &Path, vault: &Vault, id: i64, pinned: bool) -> Resul
 }
 
 /// First 200 chars of `text`, lowercased, with every control char (\n, \r,
-/// \t, ANSI escape, …) collapsed to a single space. Matches the schema's
-/// `preview` semantics in `clipd-plan.md` and keeps the value safe for
-/// console rendering and (Step 5) FTS5 indexing.
+/// \t, ANSI escape, …) collapsed to a single space. Keeps the value safe
+/// for console rendering and future FTS5 indexing.
 pub fn derive_preview(text: &str) -> String {
     let one_line: String = text
         .chars()
@@ -725,7 +721,7 @@ mod tests {
         assert_eq!(derive_preview(&long).chars().count(), 200);
     }
 
-    // ---- Step 4 encryption tests ----
+    // ---- encryption tests ----
 
     #[test]
     fn encrypt_on_insert() {
@@ -779,7 +775,7 @@ mod tests {
     fn migrate_v1_to_v3_encrypts_then_adds_entry_formats() {
         let f = fixture();
         // Stand up a v1 DB by hand: install only v1 DDL, then INSERT a
-        // plaintext row with `nonce = x''` to mimic a pre-Step-4 DB.
+        // plaintext row with `nonce = x''` to mimic a pre-encryption DB.
         {
             let conn = Connection::open(&f.db).unwrap();
             conn.pragma_update(None, "journal_mode", "WAL").unwrap();
@@ -878,7 +874,7 @@ mod tests {
         assert_eq!(recovered.as_slice(), plaintext.as_bytes());
     }
 
-    // ---- Step 7 multi-format tests ----
+    // ---- multi-format tests ----
 
     fn fmt(name: &str, bytes: &[u8]) -> FormatPayload {
         FormatPayload {
@@ -1114,7 +1110,7 @@ mod tests {
         assert_eq!(formats_n, 1);
     }
 
-    // ---- Step 8 thumbnail tests ----
+    // ---- thumbnail tests ----
 
     #[test]
     fn get_thumbnail_returns_decrypted_bytes() {
@@ -1211,7 +1207,7 @@ mod tests {
         assert!(get_thumbnail(&f.db, &f.vault, id).unwrap().is_none());
     }
 
-    // ---- Step 9: search with date filters ----
+    // ---- search with date filters ----
 
     fn insert_at(f: &Fix, text: &str, t: i64) {
         let h = blake3::hash(text.as_bytes());
@@ -1288,14 +1284,14 @@ mod tests {
         assert_eq!(rows.len(), 2);
     }
 
-    // ---- Step 10: content_kind + pinned-first list ----
+    // ---- content_kind + pinned-first list ----
 
     #[test]
     fn list_pinned_floats_to_top() {
-        // Step 10's list() now applies `ORDER BY pinned DESC, last_seen DESC`,
-        // so an older pinned row outranks newer unpinned rows even with no
-        // search query (where the picker's fuzzy_rank early-returns without
-        // a pin tiebreaker).
+        // list() applies `ORDER BY pinned DESC, last_seen DESC`, so an older
+        // pinned row outranks newer unpinned rows even with no search query
+        // (where the picker's fuzzy_rank early-returns without a pin
+        // tiebreaker).
         let f = fixture();
         insert_at(&f, "old-pin", 1000);
         insert_at(&f, "newer", 5000);
@@ -1317,7 +1313,7 @@ mod tests {
         assert!(rows[0].pinned);
     }
 
-    // ---- Step 12: retention purge ----
+    // ---- retention purge ----
 
     #[test]
     fn purge_no_db_is_noop() {
@@ -1416,7 +1412,7 @@ mod tests {
         assert_eq!(list(&f.db, 50).unwrap().len(), 5);
     }
 
-    // ---- Step 12: sensitive=1 hidden from list/search ----
+    // ---- sensitive=1 hidden from list/search ----
 
     #[test]
     fn sensitive_rows_hidden_from_list_and_search() {
@@ -1532,8 +1528,8 @@ mod tests {
 
     #[test]
     fn search_pinned_floats_to_top() {
-        // Step 9 query rewrite includes `ORDER BY pinned DESC, last_seen DESC`.
-        // An older pinned row should outrank a newer unpinned row.
+        // search() applies `ORDER BY pinned DESC, last_seen DESC`. An older
+        // pinned row should outrank a newer unpinned row.
         let f = fixture();
         insert_at(&f, "old pinned needle", 1000);
         insert_at(&f, "new unpinned needle", 9000);
@@ -1554,10 +1550,10 @@ mod tests {
         assert!(rows[0].pinned);
     }
 
-    // Step 13: `clipd doctor` calls integrity_check. A healthy DB must
-    // return the literal string "ok"; a deliberately corrupted file must
-    // return something else (we don't pin the exact wording — sqlite's
-    // diagnostic strings vary by version).
+    // `clipd doctor` calls integrity_check. A healthy DB must return the
+    // literal string "ok"; a deliberately corrupted file must return
+    // something else (we don't pin the exact wording — sqlite's diagnostic
+    // strings vary by version).
     #[test]
     fn integrity_check_reports_ok_on_healthy_db() {
         let f = fixture();

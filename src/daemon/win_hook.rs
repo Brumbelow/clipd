@@ -92,7 +92,7 @@ pub fn run(state: DaemonState) -> Result<()> {
         .with_context(|| format!("RegisterHotKey ({})", state.cfg.hotkey.chord))?;
     info!("hotkey registered: {}", state.cfg.hotkey.chord);
 
-    // Step 11: install the tray icon. Lives on this same thread and routes
+    // Install the tray icon. Lives on this same thread and routes
     // mouse events through wnd_proc as TRAY_CALLBACK_MSG.
     let tray_handle = match tray::install(hwnd, state.clone()) {
         Ok(h) => Some(h),
@@ -260,9 +260,9 @@ fn read_foreground_info() -> ForegroundInfo {
     }
 }
 
-/// Step 11: trigger the picker UI. Prefers IPC `Show` to the prewarmed
-/// child, falls back to spawning a fresh `clipd pick` if the supervisor
-/// has disabled prewarm or the show send fails.
+/// Trigger the picker UI. Prefers IPC `Show` to the prewarmed child,
+/// falls back to spawning a fresh `clipd pick` if the supervisor has
+/// disabled prewarm or the show send fails.
 fn launch_picker() -> Result<()> {
     let prewarm_disabled = STATE
         .get()

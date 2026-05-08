@@ -3,12 +3,11 @@
 //! Composition:
 //!   - `win_hook`         — Win32 message-only window, listener, hotkey, message pump.
 //!   - `capture`          — clipboard payload read + store insert.
-//!   - `clipboard`        — clipboard write path (Step 5 text, Step 7 multi-format,
-//!     Step 8 image).
-//!   - `clipboard_format` — Step 7: format enumeration + name/code helpers.
-//!   - `image`            — Step 8: DIB↔PNG conversion + thumbnail resize.
+//!   - `clipboard`        — clipboard write path (text, multi-format, image).
+//!   - `clipboard_format` — format enumeration + name/code helpers.
+//!   - `image`            — DIB↔PNG conversion + thumbnail resize.
 //!   - `ipc`              — named-pipe server.
-//!   - `tray`             — Step 11: notification-area icon + popup menu
+//!   - `tray`             — notification-area icon + popup menu
 //!     (native Shell_NotifyIconW; runs inside wnd_proc on the main thread).
 
 pub mod capture;
@@ -34,14 +33,14 @@ pub struct DaemonState {
     pub cfg: Arc<Config>,
     pub vault: Arc<Vault>,
     paused: Arc<RwLock<bool>>,
-    /// Step 11: PID of the current `clipd pick --prewarm` child, or 0 if no
+    /// PID of the current `clipd pick --prewarm` child, or 0 if no
     /// prewarmed picker is alive. Set by the supervisor on each spawn.
     pub picker_pid: Arc<AtomicU32>,
-    /// Step 11: supervisor flips this after a crash-loop. With this set,
+    /// Supervisor flips this after a crash-loop. With this set,
     /// `WM_HOTKEY` falls back to spawning a fresh one-shot picker instead
     /// of sending Show over IPC.
     pub prewarm_disabled: Arc<AtomicBool>,
-    /// Step 11: tells the picker supervisor to stop respawning. Set by
+    /// Tells the picker supervisor to stop respawning. Set by
     /// `daemon::run` after the message pump exits.
     pub shutting_down: Arc<AtomicBool>,
 }
@@ -73,10 +72,10 @@ pub fn run(cfg: Config) -> Result<()> {
     let vault = Vault::open(&key_path).context("opening clipd vault (DPAPI key)")?;
     let state = DaemonState::new(Arc::new(cfg), Arc::new(vault));
     ipc::server::spawn(state.clone()).context("starting IPC server")?;
-    // Step 12: nightly retention purge. Detached thread; observes
+    // Nightly retention purge. Detached thread; observes
     // `state.shutting_down` to exit cleanly with the daemon.
     let _ = purge::spawn(state.clone());
-    // Step 11: prewarm the picker so WM_HOTKEY can re-show instead of
+    // Prewarm the picker so WM_HOTKEY can re-show instead of
     // fork-execing a fresh process per press.
     if let Err(e) = picker_supervisor::spawn(state.clone()) {
         // Non-fatal: the WM_HOTKEY handler falls back to legacy spawn.
@@ -84,7 +83,7 @@ pub fn run(cfg: Config) -> Result<()> {
         state.prewarm_disabled.store(true, Ordering::SeqCst);
     }
     let pump_result = win_hook::run(state.clone());
-    // Step 11: stop the supervisor and reap the picker child so it doesn't
+    // Stop the supervisor and reap the picker child so it doesn't
     // outlive the daemon as an orphan.
     state.shutting_down.store(true, Ordering::SeqCst);
     let pid = state.picker_pid.load(Ordering::SeqCst);

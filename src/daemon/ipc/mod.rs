@@ -19,9 +19,8 @@ pub enum Request {
     Search {
         query: String,
         limit: usize,
-        /// Step 9: zero or more `created_at` predicates. Empty for
-        /// pre-Step-9 callers and for `clipd search` CLI invocations
-        /// that don't expose date syntax yet.
+        /// Zero or more `created_at` predicates. Empty for callers that
+        /// don't expose date syntax (e.g. the `clipd search` CLI).
         #[serde(default)]
         filters: Vec<DateFilter>,
     },
@@ -35,7 +34,7 @@ pub enum Request {
     Promote {
         id: i64,
     },
-    /// Step 8: picker fetches a PNG thumbnail for an image-kind row.
+    /// Picker fetches a PNG thumbnail for an image-kind row.
     GetThumbnail {
         id: i64,
     },
@@ -49,8 +48,8 @@ pub enum Response {
     Entries(Vec<EntrySummary>),
     Ok,
     Pong,
-    /// Step 8: PNG thumbnail bytes, base64-encoded so they fit the
-    /// JSON-line protocol without a binary side channel.
+    /// PNG thumbnail bytes, base64-encoded so they fit the JSON-line
+    /// protocol without a binary side channel.
     Thumbnail {
         png_b64: String,
     },
@@ -61,10 +60,10 @@ pub enum Response {
 pub struct EntrySummary {
     pub id: i64,
     pub kind: String,
-    /// Step 10: content-shape kind (`url|json|hex|base64|code|text`).
-    /// `#[serde(default)]` keeps wire-compat with pre-Step-10 callers
-    /// during in-place upgrades — daemon and picker ship as one binary
-    /// today, but the default doesn't cost anything.
+    /// Content-shape kind (`url|json|hex|base64|code|text`).
+    /// `#[serde(default)]` keeps wire-compat with older callers during
+    /// in-place upgrades — daemon and picker ship as one binary today,
+    /// but the default doesn't cost anything.
     #[serde(default = "default_content_kind")]
     pub content_kind: String,
     pub preview: String,

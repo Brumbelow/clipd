@@ -8,9 +8,9 @@
 //!   Delete       — remove selected entry
 //!   Esc          — close without action
 //!
-//! Step 8: image-kind rows render at 80px with a 64×64 thumbnail fetched
-//! lazily from the daemon (`Request::GetThumbnail`). Thumbnails are
-//! decoded once via the `image` crate and uploaded to the GPU as an
+//! Image-kind rows render at 80px with a 64×64 thumbnail fetched lazily
+//! from the daemon (`Request::GetThumbnail`). Thumbnails are decoded once
+//! via the `image` crate and uploaded to the GPU as an
 //! `egui::TextureHandle` cached by entry id for the picker process
 //! lifetime.
 
@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
 
-/// Step 11: how the picker reacts to Esc / Enter. Legacy `pick` exits; the
+/// How the picker reacts to Esc / Enter. Legacy `pick` exits; the
 /// daemon-spawned `pick --prewarm` instance hides and reuses the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseBehaviour {
@@ -57,18 +57,18 @@ pub struct PickerApp {
     focused_once: bool,
     started_at: Instant,
     first_frame_logged: bool,
-    /// Step 11: shared with the picker-pipe listener. Flipped to `true`
-    /// on each `PickerRequest::Show`; the App reads + clears it on the
-    /// next `update()` to bring the window forward.
+    /// Shared with the picker-pipe listener. Flipped to `true` on each
+    /// `PickerRequest::Show`; the App reads + clears it on the next
+    /// `update()` to bring the window forward.
     show_requested: Arc<AtomicBool>,
     /// Timestamp of the most recent show request — drives the
     /// `picker show-to-visible frame` log line.
     show_request_at: Arc<parking_lot::Mutex<Option<Instant>>>,
-    /// Step 11: Exit (legacy) vs Hide (prewarm).
+    /// Exit (legacy) vs Hide (prewarm).
     close_behaviour: CloseBehaviour,
-    /// Step 8: lazy cache of image thumbnails keyed by entry id. Filled
-    /// on first render of each visible image row; entries persist for
-    /// the picker process lifetime.
+    /// Lazy cache of image thumbnails keyed by entry id. Filled on first
+    /// render of each visible image row; entries persist for the picker
+    /// process lifetime.
     thumb_cache: HashMap<i64, ThumbState>,
 }
 
@@ -149,8 +149,8 @@ impl PickerApp {
         self.last_query = self.query.clone();
         self.last_query_at = Instant::now();
 
-        // Step 9: split inline date filters (`:today`, `:7d`, `>YYYY-MM-DD`,
-        // …) out of the raw input. Filters become SQL `WHERE created_at`
+        // Split inline date filters (`:today`, `:7d`, `>YYYY-MM-DD`, …)
+        // out of the raw input. Filters become SQL `WHERE created_at`
         // clauses on the daemon side; `parsed.text` is the residual free
         // text passed to the existing LIKE matcher.
         let parsed = query::parse(&self.query, chrono::Local::now());
@@ -193,8 +193,8 @@ impl PickerApp {
         self.dismiss(ctx);
     }
 
-    /// Step 11: dispatch on close_behaviour. Hide-mode resets transient state
-    /// so the next Show opens with an empty query and focused TextEdit.
+    /// Dispatch on close_behaviour. Hide-mode resets transient state so the
+    /// next Show opens with an empty query and focused TextEdit.
     fn dismiss(&mut self, ctx: &egui::Context) {
         match self.close_behaviour {
             CloseBehaviour::Exit => {
@@ -248,7 +248,7 @@ impl App for PickerApp {
             info!("{label}: {}ms", self.started_at.elapsed().as_millis());
         }
 
-        // Step 11: handle Show requests from the daemon. Toggle to visible,
+        // Handle Show requests from the daemon. Toggle to visible,
         // refresh from store, log show-to-visible latency.
         if self.show_requested.swap(false, Ordering::SeqCst) {
             self.query.clear();
@@ -410,8 +410,8 @@ impl App for PickerApp {
 /// Empty query → return as-is (server already returns recency-ordered List).
 /// Otherwise: filter out non-matchers, sort pinned-first → score desc → recency desc.
 ///
-/// Pinned-first is folded in here even though Step 10 owns the broader
-/// pinning UX; without it, high-fuzzy-score noise can bury pins.
+/// Pinned-first is folded in here so high-fuzzy-score noise can't bury
+/// pins.
 fn fuzzy_rank(query: &str, items: Vec<EntrySummary>) -> Vec<EntrySummary> {
     use nucleo::pattern::{CaseMatching, Normalization, Pattern};
     use nucleo::Matcher;
@@ -442,9 +442,9 @@ fn fuzzy_rank(query: &str, items: Vec<EntrySummary>) -> Vec<EntrySummary> {
     scored.into_iter().map(|(_, e)| e).collect()
 }
 
-/// Step 10: pick the badge label + colour. For `kind == "text"` the badge
-/// reflects the content-shape `content_kind` (url/json/hex/base64/code/text);
-/// for image/files/html/rtf the capture-format `kind` wins because shape
+/// Pick the badge label + colour. For `kind == "text"` the badge reflects
+/// the content-shape `content_kind` (url/json/hex/base64/code/text); for
+/// image/files/html/rtf the capture-format `kind` wins because shape
 /// classification isn't meaningful there.
 fn badge(kind: &str, content_kind: &str) -> egui::RichText {
     let display = if kind == "text" { content_kind } else { kind };

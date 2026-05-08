@@ -1,4 +1,4 @@
-//! Step 8: DIB ↔ PNG conversion + thumbnail resize + BMP-file wrap.
+//! DIB ↔ PNG conversion + thumbnail resize + BMP-file wrap.
 //!
 //! Pure data transformations — no I/O, no Win32 calls, no clipboard
 //! interaction. Capture (`src/daemon/capture.rs`) feeds raw CF_DIB bytes

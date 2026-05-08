@@ -124,7 +124,7 @@ impl Config {
         self.data_dir().join("key.dpapi")
     }
 
-    /// Step 13: directory the file logger writes into. Created lazily by
+    /// Directory the file logger writes into. Created lazily by
     /// `init_tracing`; surfaced by `clipd doctor` so users can find their
     /// log file from the CLI.
     pub fn logs_dir(&self) -> PathBuf {

@@ -1,10 +1,10 @@
-//! egui picker process. Wired in Step 6.
+//! egui picker process.
 //!
 //! `clipd pick` boots a borderless, always-on-top eframe window. The daemon's
 //! WM_HOTKEY handler spawns this binary with `pick`; the picker talks back to
-//! the daemon over the Step-5 named-pipe IPC for List/Search/Promote/Pin/Delete.
+//! the daemon over the named-pipe IPC for List/Search/Promote/Pin/Delete.
 //!
-//! Step 11: `clipd pick --prewarm` boots hidden and listens on
+//! `clipd pick --prewarm` boots hidden and listens on
 //! `\\.\pipe\clipd-picker` for `Show` requests so the daemon can re-show the
 //! same process on hotkey instead of fork-execing every time. Esc/Enter hide
 //! instead of exiting.
@@ -22,9 +22,9 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 pub fn run(cfg: Config, prewarm: bool) -> Result<()> {
-    // Measures eframe init + first-paint — the part Step 6.5's wgpu→glow swap
-    // is targeting. Process spawn + arg parse + config load happen before this
-    // and are tracked as residual in the SESSION_LOG.
+    // Measures eframe init + first-paint — the part the wgpu→glow swap
+    // is targeting. Process spawn + arg parse + config load happen before
+    // this and are not measured here.
     let started_at = Instant::now();
     let cfg = Arc::new(cfg);
 

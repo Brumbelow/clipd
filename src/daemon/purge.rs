@@ -1,4 +1,4 @@
-//! Step 12: nightly retention purge.
+//! Nightly retention purge.
 //!
 //! Spawned at daemon startup. Runs `store::purge` once on launch (so a daemon
 //! that's been off for a week catches up without waiting), then sleeps 24h

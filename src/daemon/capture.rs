@@ -1,11 +1,11 @@
-//! Clipboard capture: read CF_UNICODETEXT (Step 2/7) or CF_DIB (Step 8),
-//! classify, hash, persist (or bump dedup).
+//! Clipboard capture: read CF_UNICODETEXT or CF_DIB, classify, hash,
+//! persist (or bump dedup).
 //!
-//! Step 7 captures every text + rich-text format the source app put down
-//! into a per-row child table; Step 8 adds an image branch that fires when
-//! no CF_UNICODETEXT is present but CF_DIB is.
+//! Text captures pull every text + rich-text format the source app put
+//! down into a per-row child table; the image branch fires when no
+//! CF_UNICODETEXT is present but CF_DIB is.
 //!
-//! **Logging contract (AGENTS rule 8/123):** metadata only. Never log
+//! **Logging contract:** metadata only. Never log
 //! preview text, content bytes, hashes, or other content-derived values.
 
 use crate::config::{CaptureConfig, SensitivePolicy};
@@ -56,9 +56,9 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
     let text: String = match get(formats::Unicode) {
         Ok(s) => s,
         Err(e) => {
-            // No text — Step 8 image branch. The pre-text gates above have
-            // already fired and apply equally to image events (exclude
-            // flag, history flag, browser-extension popup).
+            // No text — fall through to the image branch. The pre-text
+            // gates above have already fired and apply equally to image
+            // events (exclude flag, history flag, browser-extension popup).
             tracing::debug!(error = %e, "get_clipboard(Unicode) miss; trying image");
             if let Err(img_err) = try_capture_image(state) {
                 tracing::info!(kind = "unsupported", "clipboard update");
@@ -104,10 +104,9 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
     let bytes = text.as_bytes();
     let hash = blake3::hash(bytes);
 
-    // Step 7: enumerate every clipboard format the source app put down,
-    // filtered by the allow-list and size caps. The `_clip` RAII guard
-    // above keeps the clipboard open across this call, which EnumFormats
-    // requires.
+    // Enumerate every clipboard format the source app put down, filtered
+    // by the allow-list and size caps. The `_clip` RAII guard above keeps
+    // the clipboard open across this call, which EnumFormats requires.
     let captured_formats = clipboard_format::enumerate_formats();
     let total_format_bytes: usize = captured_formats.iter().map(|f| f.bytes.len()).sum();
 
@@ -120,7 +119,7 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
     );
 
     let now_ms = chrono::Utc::now().timestamp_millis();
-    // Step 10: classify content shape from the canonical text. Cheap —
+    // Classify content shape from the canonical text. Cheap —
     // bounded-time regex/prefix checks over the captured payload.
     let content_kind = crate::classify::classify(&text);
     let outcome = store::insert_or_bump(
@@ -149,9 +148,9 @@ pub fn handle_clipboard_update(state: &DaemonState, fg: &ForegroundInfo) -> Resu
     Ok(())
 }
 
-/// Step 8: read CF_DIB off the clipboard (assumes [`Clipboard`] is already
-/// open via the caller's RAII guard), encode a thumbnail + full PNG via
-/// the `image` module, and persist with `kind="image"`.
+/// Read CF_DIB off the clipboard (assumes [`Clipboard`] is already open
+/// via the caller's RAII guard), encode a thumbnail + full PNG via the
+/// `image` module, and persist with `kind="image"`.
 ///
 /// Returns `Ok(())` on a successful insert OR a clean "no CF_DIB present"
 /// — the latter is the common case for non-image, non-text clipboard
@@ -331,7 +330,7 @@ fn skip_reason(
     }
 }
 
-/// Step 12: case-insensitive basename match against the configured
+/// Case-insensitive basename match against the configured
 /// `[capture] excluded_apps` list. Empty list short-circuits.
 fn is_excluded_app(fg: &ForegroundInfo, excluded: &[String]) -> bool {
     if excluded.is_empty() {
