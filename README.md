@@ -155,6 +155,11 @@ hotkey registration, and autostart status.
 `%APPDATA%\clipd\logs\clipd.<YYYY-MM-DD>.log`. Last 14 days kept. Panics are
 captured with location, thread, and a forced backtrace.
 
+## Screenshot
+
+<img width="693" height="532" alt="image" src="https://github.com/user-attachments/assets/5adbccba-e83e-4067-a0dc-578273bbb469" />
+
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE-APACHE).
