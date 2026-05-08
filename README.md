@@ -157,7 +157,8 @@ captured with location, thread, and a forced backtrace.
 
 ## Screenshot
 
-<img width="693" height="532" alt="image" src="https://github.com/user-attachments/assets/5adbccba-e83e-4067-a0dc-578273bbb469" />
+<img width="731" height="454" alt="image" src="https://github.com/user-attachments/assets/e3c53a00-0c3a-4031-a622-6a12fd72eab5" />
+
 
 
 ## License
