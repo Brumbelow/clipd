@@ -9,8 +9,8 @@
 mod classify;
 mod config;
 mod daemon;
-mod install;
 mod picker;
+mod platform;
 mod secrets;
 mod store;
 
@@ -42,13 +42,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Open the picker window. Talks to the running daemon.
-    Pick {
-        /// Start hidden, listen on `\\.\pipe\clipd-picker`, and re-show on
-        /// Show requests instead of exiting on Esc/Enter. The daemon
-        /// launches the prewarmed instance at startup.
-        #[arg(long)]
-        prewarm: bool,
-    },
+    Pick,
 
     /// Print recent clipboard entries.
     List {
@@ -115,8 +109,8 @@ fn main() -> Result<()> {
     }
 
     match cli.cmd {
-        Some(Cmd::Pick { prewarm }) => picker::run(cfg, prewarm),
-        None => picker::run(cfg, false),
+        Some(Cmd::Pick) => picker::run(cfg),
+        None => picker::run(cfg),
         Some(Cmd::List { limit }) => cli_list(&cfg, limit),
         Some(Cmd::Search { query, limit }) => cli_search(&cfg, &query, limit),
         Some(Cmd::Delete { id }) => cli_delete(&cfg, id),
@@ -183,9 +177,8 @@ fn build_file_appender(
 
 /// Panic hook that logs the message, source location, thread name, and a
 /// forced backtrace via `tracing::error!` so it lands in both the console
-/// and file subscribers. Guarded by `Once` because the picker supervisor
-/// relaunches `clipd pick --prewarm` and tests re-init the process;
-/// double-installing would chain hooks and double-log.
+/// and file subscribers. Guarded by `Once` because tests re-init the
+/// process; double-installing would chain hooks and double-log.
 fn install_panic_hook() {
     static INIT: std::sync::Once = std::sync::Once::new();
     INIT.call_once(|| {
@@ -334,7 +327,10 @@ fn cli_doctor(cfg: &config::Config) -> Result<()> {
                     println!("             {line}");
                 }
             }
-            Err(e) => println!("  db:        {} (integrity probe failed: {e})", db_path.display()),
+            Err(e) => println!(
+                "  db:        {} (integrity probe failed: {e})",
+                db_path.display()
+            ),
         }
     }
 
@@ -366,7 +362,7 @@ fn cli_doctor(cfg: &config::Config) -> Result<()> {
         );
     }
 
-    match install::autostart_enabled() {
+    match platform::autostart::autostart_enabled() {
         Ok(true) => println!("  autostart: enabled"),
         Ok(false) => println!("  autostart: disabled"),
         Err(e) => println!("  autostart: unknown ({e})"),
@@ -388,7 +384,7 @@ fn cli_config(cfg: &config::Config, path: bool, show: bool) -> Result<()> {
 
 fn cli_install(_cfg: &config::Config, autostart: bool) -> Result<()> {
     if autostart {
-        install::enable_autostart()?;
+        platform::autostart::enable_autostart()?;
         println!("autostart enabled (HKCU\\…\\Run\\clipd)");
     } else {
         println!("nothing to do — pass --autostart to register the daemon at logon");
@@ -397,7 +393,7 @@ fn cli_install(_cfg: &config::Config, autostart: bool) -> Result<()> {
 }
 
 fn cli_uninstall(_cfg: &config::Config) -> Result<()> {
-    install::disable_autostart()?;
+    platform::autostart::disable_autostart()?;
     println!("autostart removed");
     Ok(())
 }

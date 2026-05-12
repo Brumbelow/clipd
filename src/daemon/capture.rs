@@ -344,9 +344,7 @@ fn is_excluded_app(fg: &ForegroundInfo, excluded: &[String]) -> bool {
         .next()
         .unwrap_or(image)
         .to_ascii_lowercase();
-    excluded
-        .iter()
-        .any(|e| e.to_ascii_lowercase() == basename)
+    excluded.iter().any(|e| e.to_ascii_lowercase() == basename)
 }
 
 fn log_skip(kind: &str, size_bytes: Option<usize>, reason: Reason) {
@@ -554,7 +552,10 @@ mod tests {
         assert_eq!(
             skip_reason(
                 Some("plain text"),
-                &fg(Some("Untitled - Notepad"), Some(r"C:\Windows\System32\notepad.exe")),
+                &fg(
+                    Some("Untitled - Notepad"),
+                    Some(r"C:\Windows\System32\notepad.exe")
+                ),
                 false,
                 ClipboardHistoryFlag::Missing,
                 &cap,

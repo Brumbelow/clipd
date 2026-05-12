@@ -1,5 +1,13 @@
 //! Clipboard-format enumeration + name/code lookup.
 //!
+//! **Windows-only.** Hard-coded against Win32 `CF_*` numeric codes. Will
+//! move under [`crate::platform`] during the Linux/Mac port — Linux uses
+//! MIME types over X11/Wayland selections, macOS uses UTType identifiers
+//! on NSPasteboard. The right abstraction is a format-tag enum that the
+//! capture pipeline reads from, rather than raw `u32` codes.
+//!
+//! Original surface follows.
+//!
 //! Surface:
 //!   - [`FormatPayload`] — `(name, bytes)` pair captured from one clipboard format.
 //!   - [`enumerate_formats`] — read every format the source app put on the

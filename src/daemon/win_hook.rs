@@ -1,6 +1,11 @@
 //! Win32 plumbing: message-only window, clipboard listener, global hotkey.
 //!
 //! All Win32 calls are unsafe; SAFETY comments cover each block.
+//!
+//! **Windows-only.** Will move under [`crate::platform`] when the Linux/Mac
+//! port lands and forces a concrete cross-platform abstraction shape
+//! (likely a clipboard-monitor + hotkey trait, since each OS has very
+//! different event delivery models).
 
 use crate::daemon::{capture, tray, DaemonState};
 use anyhow::{anyhow, bail, Context, Result};
@@ -260,30 +265,9 @@ fn read_foreground_info() -> ForegroundInfo {
     }
 }
 
-/// Trigger the picker UI. Prefers IPC `Show` to the prewarmed child,
-/// falls back to spawning a fresh `clipd pick` if the supervisor has
-/// disabled prewarm or the show send fails.
+/// Spawn a fresh `clipd pick` process. ~150–400ms per press but reliable;
+/// see `daemon::run` for the prewarm history.
 fn launch_picker() -> Result<()> {
-    let prewarm_disabled = STATE
-        .get()
-        .map(|s| s.prewarm_disabled.load(std::sync::atomic::Ordering::SeqCst))
-        .unwrap_or(true);
-
-    if !prewarm_disabled {
-        let t0 = std::time::Instant::now();
-        match crate::daemon::ipc::picker_pipe::send_show() {
-            Ok(()) => {
-                info!(
-                    "WM_HOTKEY -> picker show ack: {}ms",
-                    t0.elapsed().as_millis()
-                );
-                return Ok(());
-            }
-            Err(e) => warn!("picker show via pipe failed; falling back to spawn: {e:#}"),
-        }
-    }
-
-    // Fallback: legacy fresh-process spawn.
     let exe = std::env::current_exe().context("locating clipd.exe")?;
     std::process::Command::new(exe)
         .arg("pick")

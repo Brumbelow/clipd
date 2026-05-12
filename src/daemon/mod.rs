@@ -15,7 +15,6 @@ pub mod clipboard;
 pub mod clipboard_format;
 pub mod image;
 pub mod ipc;
-pub mod picker_supervisor;
 pub mod purge;
 pub mod tray;
 pub mod win_hook;
@@ -24,7 +23,7 @@ use crate::config::Config;
 use crate::store::crypto::Vault;
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// Shared daemon state. Cloneable: each subsystem holds its own handle.
@@ -33,15 +32,8 @@ pub struct DaemonState {
     pub cfg: Arc<Config>,
     pub vault: Arc<Vault>,
     paused: Arc<RwLock<bool>>,
-    /// PID of the current `clipd pick --prewarm` child, or 0 if no
-    /// prewarmed picker is alive. Set by the supervisor on each spawn.
-    pub picker_pid: Arc<AtomicU32>,
-    /// Supervisor flips this after a crash-loop. With this set,
-    /// `WM_HOTKEY` falls back to spawning a fresh one-shot picker instead
-    /// of sending Show over IPC.
-    pub prewarm_disabled: Arc<AtomicBool>,
-    /// Tells the picker supervisor to stop respawning. Set by
-    /// `daemon::run` after the message pump exits.
+    /// Set true by `daemon::run` after the message pump exits so background
+    /// threads (currently `purge`) can break out of their wait loops.
     pub shutting_down: Arc<AtomicBool>,
 }
 
@@ -51,8 +43,6 @@ impl DaemonState {
             cfg,
             vault,
             paused: Arc::new(RwLock::new(false)),
-            picker_pid: Arc::new(AtomicU32::new(0)),
-            prewarm_disabled: Arc::new(AtomicBool::new(false)),
             shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -75,19 +65,13 @@ pub fn run(cfg: Config) -> Result<()> {
     // Nightly retention purge. Detached thread; observes
     // `state.shutting_down` to exit cleanly with the daemon.
     let _ = purge::spawn(state.clone());
-    // Prewarm is disabled: a hidden eframe window stops servicing
-    // `Visible(true)` viewport commands after one hide cycle on Windows,
-    // so subsequent hotkey presses never resurfaced the picker. WM_HOTKEY
-    // cold-spawns `clipd pick` per press instead — slower (~150–400ms
-    // each) but reliable.
-    state.prewarm_disabled.store(true, Ordering::SeqCst);
+    // WM_HOTKEY cold-spawns `clipd pick` per press (~150–400ms each but
+    // reliable). A previous prewarmed-picker design was removed because a
+    // hidden eframe window stopped servicing `Visible(true)` viewport
+    // commands after one hide cycle on Windows.
     let pump_result = win_hook::run(state.clone());
-    // Stop the supervisor and reap the picker child so it doesn't
-    // outlive the daemon as an orphan.
-    state.shutting_down.store(true, Ordering::SeqCst);
-    let pid = state.picker_pid.load(Ordering::SeqCst);
-    if pid != 0 {
-        picker_supervisor::kill_pid(pid);
-    }
+    state
+        .shutting_down
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     pump_result
 }

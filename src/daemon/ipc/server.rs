@@ -59,7 +59,10 @@ pub fn spawn_with_name(state: DaemonState, name: &str) -> Result<()> {
                         }
                     });
             }
-            // TODO(step 13): graceful shutdown — close listener on SIGTERM/WM_QUIT.
+            // No graceful shutdown: the listener blocks on accept() until
+            // the process exits, at which point the OS reaps the thread and
+            // closes the pipe handle. There's no leak to clean up — see the
+            // module-level doc comment.
         })
         .context("spawning IPC listener thread")?;
 

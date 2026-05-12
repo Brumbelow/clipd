@@ -20,20 +20,9 @@ use crate::picker::query;
 use base64::Engine;
 use eframe::App;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tracing::{info, warn};
-
-/// How the picker reacts to Esc / Enter. Legacy `pick` exits; the
-/// daemon-spawned `pick --prewarm` instance hides and reuses the process.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CloseBehaviour {
-    /// Send `ViewportCommand::Close` and let eframe shut down.
-    Exit,
-    /// Send `ViewportCommand::Visible(false)`, reset query state, stay alive.
-    Hide,
-}
 
 /// State of an image row's thumbnail in the picker cache.
 enum ThumbState {
@@ -57,15 +46,6 @@ pub struct PickerApp {
     focused_once: bool,
     started_at: Instant,
     first_frame_logged: bool,
-    /// Shared with the picker-pipe listener. Flipped to `true` on each
-    /// `PickerRequest::Show`; the App reads + clears it on the next
-    /// `update()` to bring the window forward.
-    show_requested: Arc<AtomicBool>,
-    /// Timestamp of the most recent show request — drives the
-    /// `picker show-to-visible frame` log line.
-    show_request_at: Arc<parking_lot::Mutex<Option<Instant>>>,
-    /// Exit (legacy) vs Hide (prewarm).
-    close_behaviour: CloseBehaviour,
     /// Lazy cache of image thumbnails keyed by entry id. Filled on first
     /// render of each visible image row; entries persist for the picker
     /// process lifetime.
@@ -73,13 +53,7 @@ pub struct PickerApp {
 }
 
 impl PickerApp {
-    pub fn new(
-        cfg: Arc<Config>,
-        started_at: Instant,
-        close_behaviour: CloseBehaviour,
-        show_requested: Arc<AtomicBool>,
-        show_request_at: Arc<parking_lot::Mutex<Option<Instant>>>,
-    ) -> Self {
+    pub fn new(cfg: Arc<Config>, started_at: Instant) -> Self {
         let mut s = Self {
             cfg,
             query: String::new(),
@@ -92,9 +66,6 @@ impl PickerApp {
             focused_once: false,
             started_at,
             first_frame_logged: false,
-            show_requested,
-            show_request_at,
-            close_behaviour,
             thumb_cache: HashMap::new(),
         };
         s.refresh();
@@ -193,24 +164,8 @@ impl PickerApp {
         self.dismiss(ctx);
     }
 
-    /// Dispatch on close_behaviour. Hide-mode resets transient state so the
-    /// next Show opens with an empty query and focused TextEdit.
     fn dismiss(&mut self, ctx: &egui::Context) {
-        match self.close_behaviour {
-            CloseBehaviour::Exit => {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            }
-            CloseBehaviour::Hide => {
-                self.query.clear();
-                self.last_query.clear();
-                self.selected = 0;
-                self.error = None;
-                self.focused_once = false;
-                self.needs_refresh = true;
-                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            }
-        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     fn delete_selected(&mut self) {
@@ -241,30 +196,10 @@ impl App for PickerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if !self.first_frame_logged {
             self.first_frame_logged = true;
-            let label = match self.close_behaviour {
-                CloseBehaviour::Hide => "picker init to first hidden frame",
-                CloseBehaviour::Exit => "picker cold-start to first frame",
-            };
-            info!("{label}: {}ms", self.started_at.elapsed().as_millis());
-        }
-
-        // Handle Show requests from the daemon. Toggle to visible,
-        // refresh from store, log show-to-visible latency.
-        if self.show_requested.swap(false, Ordering::SeqCst) {
-            self.query.clear();
-            self.last_query.clear();
-            self.selected = 0;
-            self.error = None;
-            self.focused_once = false;
-            self.needs_refresh = true;
-            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            if let Some(t) = self.show_request_at.lock().take() {
-                info!(
-                    "picker show-to-visible frame: {}ms",
-                    t.elapsed().as_millis()
-                );
-            }
+            info!(
+                "picker cold-start to first frame: {}ms",
+                self.started_at.elapsed().as_millis()
+            );
         }
 
         // Debounced search refresh: 80ms after last keystroke.

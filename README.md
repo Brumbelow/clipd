@@ -42,9 +42,26 @@ Win32/.NET UIs without fuzzy search or developer affordances.
 
 To remove autostart: `.\clipd.exe uninstall`.
 
+## Building from source
+
+Requirements: Rust 1.78+ (`rustup default stable`), Windows 10+ with the
+`x86_64-pc-windows-msvc` target.
+
+```
+cargo build --release
+```
+
+The binary lands at `target/release/clipd.exe`. `cargo test` runs the unit
+suite — the DPAPI paths in `store::crypto` only execute on Windows, but the
+rest of the tree builds and tests on Linux dev hosts via the identity-wrap
+stub in [src/platform/keyring.rs](src/platform/keyring.rs).
+
+The release flow (signing, zipping, uploading) is documented in
+[RELEASING.md](RELEASING.md).
+
 ### First-run SmartScreen warning
 
-`clipd.exe` is signed by via Microsoft Trusted Signing.
+`clipd.exe` is signed via Microsoft Trusted Signing.
 SmartScreen also weighs application reputation, which builds with download
 volume; until reputation accumulates, the first time you run the binary
 you may still see "Windows protected your PC."
@@ -155,7 +172,7 @@ hotkey registration, and autostart status.
 `%APPDATA%\clipd\logs\clipd.<YYYY-MM-DD>.log`. Last 14 days kept. Panics are
 captured with location, thread, and a forced backtrace.
 
-## Screenshot (screenshots view still in progress)
+## Screenshot
 
 <img width="731" height="454" alt="image" src="https://github.com/user-attachments/assets/e3c53a00-0c3a-4031-a622-6a12fd72eab5" />
 

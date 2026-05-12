@@ -3,7 +3,6 @@
 //! Wire types live here so both the [`server`] (daemon-side) and [`client`]
 //! (CLI / picker-side) can deserialize without a circular dep.
 
-pub mod picker_pipe;
 pub mod server;
 
 use crate::config::Config;

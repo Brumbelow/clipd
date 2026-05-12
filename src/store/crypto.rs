@@ -6,22 +6,18 @@
 //!
 //! Key file lifecycle:
 //!   - Generated on first `Vault::open()` if the key file is missing.
-//!   - Stored as DPAPI-protected blob at `key.dpapi`.
+//!   - Stored as a DPAPI-protected blob at `key.dpapi` on Windows.
 //!   - Tied to the current Windows user via `CryptProtectData`.
+//!
+//! Platform-specific wrap/unwrap lives in [`crate::platform::keyring`].
 
 use aes_gcm::aead::Aead;
 
+use crate::platform::keyring;
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use anyhow::{anyhow, Context, Result};
 use rand::RngCore;
 use std::path::{Path, PathBuf};
-
-#[cfg(windows)]
-use windows::Win32::Foundation::LocalFree;
-#[cfg(windows)]
-use windows::Win32::Security::Cryptography::{
-    CryptProtectData, CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
-};
 
 const KEY_BYTES: usize = 32;
 const NONCE_BYTES: usize = 12;
@@ -36,14 +32,14 @@ impl Vault {
     pub fn open(key_path: &Path) -> Result<Self> {
         let key_bytes = if key_path.exists() {
             let wrapped = std::fs::read(key_path).context("reading key file")?;
-            unwrap_with_dpapi(&wrapped).context("unwrapping key with DPAPI")?
+            keyring::unwrap(&wrapped).context("unwrapping key")?
         } else {
             if let Some(parent) = key_path.parent() {
                 std::fs::create_dir_all(parent).context("creating key parent dir")?;
             }
             let mut k = vec![0u8; KEY_BYTES];
             rand::thread_rng().fill_bytes(&mut k);
-            let wrapped = wrap_with_dpapi(&k).context("wrapping new key with DPAPI")?;
+            let wrapped = keyring::wrap(&k).context("wrapping new key")?;
             std::fs::write(key_path, &wrapped).context("writing key file")?;
             tracing::info!("generated new clipd key at {}", key_path.display());
             k
@@ -66,17 +62,16 @@ impl Vault {
     ///
     /// `Vault::open` creates and persists a fresh key when the file is
     /// missing — wrong shape for a diagnostic probe. `probe` only verifies
-    /// an existing file: read bytes, run DPAPI unwrap, check the unwrapped
-    /// length. Returns `Ok(unwrapped_len)` on success. Errors if the file
-    /// is missing, unreadable, fails DPAPI unwrap (wrong user / corrupted),
-    /// or has the wrong unwrapped length.
+    /// an existing file: read bytes, run the platform unwrap, check the
+    /// unwrapped length. Returns `Ok(unwrapped_len)` on success. Errors if
+    /// the file is missing, unreadable, fails unwrap (wrong user /
+    /// corrupted), or has the wrong unwrapped length.
     pub fn probe(key_path: &Path) -> Result<usize> {
         if !key_path.exists() {
             return Err(anyhow!("key file missing: {}", key_path.display()));
         }
         let wrapped = std::fs::read(key_path).context("reading key file")?;
-        let unwrapped =
-            unwrap_with_dpapi(&wrapped).context("unwrapping key with DPAPI")?;
+        let unwrapped = keyring::unwrap(&wrapped).context("unwrapping key")?;
         if unwrapped.len() != KEY_BYTES {
             return Err(anyhow!(
                 "key file has wrong length: expected {KEY_BYTES}, got {}",
@@ -112,94 +107,6 @@ impl Vault {
             .map_err(|e| anyhow!("AES-GCM decrypt: {e}"))?;
         Ok(pt)
     }
-}
-
-// ---- DPAPI wrap/unwrap ----
-
-#[cfg(windows)]
-fn wrap_with_dpapi(plaintext: &[u8]) -> Result<Vec<u8>> {
-    let in_blob = CRYPT_INTEGER_BLOB {
-        cbData: plaintext.len() as u32,
-        pbData: plaintext.as_ptr() as *mut u8,
-    };
-    let mut out_blob = CRYPT_INTEGER_BLOB::default();
-
-    // SAFETY: CryptProtectData with NULL description, NULL entropy, NULL prompt;
-    // CRYPTPROTECT_UI_FORBIDDEN ensures no UI thread is required. Output blob
-    // memory is allocated by the OS and must be freed with LocalFree.
-    unsafe {
-        CryptProtectData(
-            &in_blob,
-            None,
-            None,
-            None,
-            None,
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut out_blob,
-        )
-        .context("CryptProtectData")?;
-    }
-
-    // SAFETY: out_blob.pbData is valid for cbData bytes per the API contract.
-    let result =
-        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
-    // SAFETY: must free the OS allocation.
-    unsafe {
-        let _ = LocalFree(windows::Win32::Foundation::HLOCAL(
-            out_blob.pbData as *mut _,
-        ));
-    }
-    Ok(result)
-}
-
-#[cfg(windows)]
-fn unwrap_with_dpapi(wrapped: &[u8]) -> Result<Vec<u8>> {
-    let in_blob = CRYPT_INTEGER_BLOB {
-        cbData: wrapped.len() as u32,
-        pbData: wrapped.as_ptr() as *mut u8,
-    };
-    let mut out_blob = CRYPT_INTEGER_BLOB::default();
-
-    // SAFETY: same invariants as CryptProtectData.
-    unsafe {
-        CryptUnprotectData(
-            &in_blob,
-            None,
-            None,
-            None,
-            None,
-            CRYPTPROTECT_UI_FORBIDDEN,
-            &mut out_blob,
-        )
-        .context("CryptUnprotectData")?;
-    }
-
-    // SAFETY: out_blob.pbData valid for cbData bytes.
-    let result =
-        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec() };
-    // SAFETY: free OS allocation.
-    unsafe {
-        let _ = LocalFree(windows::Win32::Foundation::HLOCAL(
-            out_blob.pbData as *mut _,
-        ));
-    }
-    Ok(result)
-}
-
-// ---- Non-Windows fallback (for `cargo check` / unit tests on Linux dev hosts) ----
-
-#[cfg(not(windows))]
-fn wrap_with_dpapi(plaintext: &[u8]) -> Result<Vec<u8>> {
-    // Dev-only no-op so unit tests can run on Linux. NEVER ship this enabled
-    // on a non-Windows target — Cargo.toml restricts the target triple.
-    tracing::warn!("DPAPI not available on this platform — using identity wrap (DEV ONLY)");
-    Ok(plaintext.to_vec())
-}
-
-#[cfg(not(windows))]
-fn unwrap_with_dpapi(wrapped: &[u8]) -> Result<Vec<u8>> {
-    tracing::warn!("DPAPI not available on this platform — using identity unwrap (DEV ONLY)");
-    Ok(wrapped.to_vec())
 }
 
 #[cfg(test)]

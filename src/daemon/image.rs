@@ -8,6 +8,12 @@
 //! BMP-file format that `clipboard_win::raw::set_bitmap` requires for
 //! reconstructing CF_BITMAP.
 //!
+//! **Windows-only.** DIB is the Windows clipboard's native image carrier.
+//! Mac (NSPasteboard accepts PNG/TIFF directly) and Linux (X11 selections
+//! typically use `image/png` MIME) won't need the BMP-file dance.
+//! The PNG encode/decode helpers stay platform-neutral; only the DIB code
+//! moves into the platform-specific clipboard layer during the port.
+//!
 //! Scope: BI_RGB at 24 or 32 bits per pixel. That's what Win+PrtScn produces
 //! on modern Windows. Other formats (paletted, BI_BITFIELDS, BI_RLE) round-trip
 //! via the canonical CF_DIB bytes we store verbatim, but generate no thumbnail.

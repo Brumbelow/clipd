@@ -5,6 +5,11 @@
 //! its Linux build pulls `gtk 0.18 -> glib 0.18.5` (RUSTSEC-2024-0429) into
 //! Cargo.lock even though that chain never compiles on Windows.
 //!
+//! **Windows-only.** Will move under [`crate::platform`] during the
+//! Linux/Mac port — Linux needs freedesktop StatusNotifierItem and macOS
+//! needs NSStatusBar; the trait shape will become clear when the second
+//! implementation lands.
+//!
 //! Lifecycle:
 //!   * `install(hwnd, state)` — adds the icon and stashes a [`TrayHandle`].
 //!     Called from `win_hook::run` after `CreateWindowExW`.

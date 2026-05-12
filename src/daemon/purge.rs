@@ -33,11 +33,7 @@ fn run(state: DaemonState) {
         ) {
             Ok(stats) => {
                 if stats.by_age + stats.by_cap > 0 {
-                    tracing::info!(
-                        by_age = stats.by_age,
-                        by_cap = stats.by_cap,
-                        "purge"
-                    );
+                    tracing::info!(by_age = stats.by_age, by_cap = stats.by_cap, "purge");
                 } else {
                     tracing::debug!("purge: nothing to drop");
                 }

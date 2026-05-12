@@ -479,11 +479,9 @@ pub fn purge(
 
     if max_entries > 0 {
         let unpinned: i64 = tx
-            .query_row(
-                "SELECT COUNT(*) FROM entries WHERE pinned = 0",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM entries WHERE pinned = 0", [], |r| {
+                r.get(0)
+            })
             .context("count unpinned (purge)")?;
         let excess = unpinned - max_entries as i64;
         if excess > 0 {
@@ -1350,7 +1348,10 @@ mod tests {
 
         let rows = list(&f.db, 50).unwrap();
         let previews: Vec<_> = rows.iter().map(|r| r.preview.as_str()).collect();
-        assert!(previews.contains(&"two-days-old"), "pinned survives age purge");
+        assert!(
+            previews.contains(&"two-days-old"),
+            "pinned survives age purge"
+        );
         assert!(previews.contains(&"still-fresh"));
         assert!(!previews.contains(&"old-unpinned"));
     }
@@ -1382,11 +1383,9 @@ mod tests {
         }
         let id_first: i64 = Connection::open(&f.db)
             .unwrap()
-            .query_row(
-                "SELECT id FROM entries WHERE preview = 'e0'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT id FROM entries WHERE preview = 'e0'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         set_pinned(&f.db, &f.vault, id_first, true).unwrap();
 
